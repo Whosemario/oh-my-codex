@@ -73,6 +73,7 @@ import {
   isMsysOrGitBash,
   isNativeWindows,
   isTmuxAvailable,
+  translateWorkerLaunchArgsForCli,
 } from "../team/tmux-session.js";
 import { getPackageRoot } from "../utils/package.js";
 import { codexConfigPath, rememberOmxLaunchContext, resolveOmxEntryPath } from "../utils/paths.js";
@@ -191,6 +192,7 @@ Options:
 
 const REASONING_KEY = "model_reasoning_effort";
 const MODEL_INSTRUCTIONS_FILE_KEY = "model_instructions_file";
+const OMX_CLI_ENV = "OMX_CLI";
 const TEAM_WORKER_LAUNCH_ARGS_ENV = "OMX_TEAM_WORKER_LAUNCH_ARGS";
 const TEAM_INHERIT_LEADER_FLAGS_ENV = "OMX_TEAM_INHERIT_LEADER_FLAGS";
 const OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV = "OMX_BYPASS_DEFAULT_SYSTEM_PROMPT";
@@ -225,6 +227,8 @@ const TMUX_EXTENDED_KEYS_FALLBACK_MODE = "off";
 const TMUX_EXTENDED_KEYS_LEASE_DIR = "tmux-extended-keys";
 const TMUX_EXTENDED_KEYS_LOCK_RETRY_MS = 20;
 const TMUX_EXTENDED_KEYS_LOCK_MAX_ATTEMPTS = 100;
+const OMX_CLI_VALUES = new Set(["codex", "claude", "gemini", "opencode"]);
+export type OmxCli = "codex" | "claude" | "gemini" | "opencode";
 
 type CliCommand =
   | "launch"
@@ -519,8 +523,9 @@ function runCodexBlocking(
   cwd: string,
   launchArgs: string[],
   codexEnv: NodeJS.ProcessEnv,
+  cliCommand: OmxCli = "codex",
 ): void {
-  const { result } = spawnPlatformCommandSync("codex", launchArgs, {
+  const { result } = spawnPlatformCommandSync(cliCommand, launchArgs, {
     cwd,
     stdio: "inherit",
     env: codexEnv,
@@ -532,14 +537,14 @@ function runCodexBlocking(
     const kind = classifySpawnError(errno);
     if (kind === "missing") {
       console.error(
-        "[omx] failed to launch codex: executable not found in PATH",
+        `[omx] failed to launch ${cliCommand}: executable not found in PATH`,
       );
     } else if (kind === "blocked") {
       console.error(
-        `[omx] failed to launch codex: executable is present but blocked in the current environment (${errno.code || "blocked"})`,
+        `[omx] failed to launch ${cliCommand}: executable is present but blocked in the current environment (${errno.code || "blocked"})`,
       );
     } else {
-      console.error(`[omx] failed to launch codex: ${errno.message}`);
+      console.error(`[omx] failed to launch ${cliCommand}: ${errno.message}`);
     }
     throw result.error;
   }
@@ -550,9 +555,16 @@ function runCodexBlocking(
         ? result.status
         : resolveSignalExitCode(result.signal);
     if (result.signal) {
-      console.error(`[omx] codex exited due to signal ${result.signal}`);
+      console.error(`[omx] ${cliCommand} exited due to signal ${result.signal}`);
     }
   }
+}
+
+export function resolveOmxCli(env: NodeJS.ProcessEnv = process.env): OmxCli {
+  const raw = String(env[OMX_CLI_ENV] ?? "").trim().toLowerCase();
+  if (raw === "") return "codex";
+  if (OMX_CLI_VALUES.has(raw)) return raw as OmxCli;
+  throw new Error(`Invalid ${OMX_CLI_ENV} value "${env[OMX_CLI_ENV]}". Expected: codex, claude, gemini, opencode`);
 }
 
 interface TmuxPaneSnapshot {
@@ -879,6 +891,7 @@ export async function launchWithHud(args: string[]): Promise<void> {
   }
 
   const launchCwd = process.cwd();
+  const selectedCli = resolveOmxCli(process.env);
   const parsedWorktree = parseWorktreeMode(args);
   const notifyTempResult = resolveNotifyTempContract(
     parsedWorktree.remainingArgs,
@@ -972,6 +985,7 @@ export async function launchWithHud(args: string[]): Promise<void> {
       codexHomeOverride,
       notifyTempContractRaw,
       explicitLaunchPolicy,
+      selectedCli,
     );
   } finally {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
@@ -981,6 +995,7 @@ export async function launchWithHud(args: string[]): Promise<void> {
 
 export async function execWithOverlay(args: string[]): Promise<void> {
   const launchCwd = process.cwd();
+  const selectedCli = resolveOmxCli(process.env);
   const parsedWorktree = parseWorktreeMode(args);
   const notifyTempResult = resolveNotifyTempContract(
     parsedWorktree.remainingArgs,
@@ -1042,12 +1057,14 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     const notifyTempContractRaw = notifyTempResult.contract.active
       ? serializeNotifyTempContract(notifyTempResult.contract)
       : null;
-    const codexArgs = injectModelInstructionsBypassArgs(
-      cwd,
-      ["exec", ...normalizedArgs],
-      process.env,
-      sessionModelInstructionsPath(cwd, sessionId),
-    );
+    const codexArgs = selectedCli === "codex"
+      ? injectModelInstructionsBypassArgs(
+          cwd,
+          ["exec", ...normalizedArgs],
+          process.env,
+          sessionModelInstructionsPath(cwd, sessionId),
+        )
+      : ["exec", ...normalizedArgs];
     const codexEnvBase = codexHomeOverride
       ? { ...process.env, CODEX_HOME: codexHomeOverride }
       : process.env;
@@ -1057,7 +1074,10 @@ export async function execWithOverlay(args: string[]): Promise<void> {
           [OMX_NOTIFY_TEMP_CONTRACT_ENV]: notifyTempContractRaw,
         }
       : codexEnvBase;
-    runCodexBlocking(cwd, codexArgs, codexEnv);
+    const leaderArgs = selectedCli === "codex"
+      ? codexArgs
+      : translateWorkerLaunchArgsForCli(selectedCli, codexArgs);
+    runCodexBlocking(cwd, leaderArgs, codexEnv, selectedCli);
   } finally {
     await postLaunch(cwd, sessionId, codexHomeOverride, true);
   }
@@ -2081,13 +2101,16 @@ function runCodex(
   codexHomeOverride?: string,
   notifyTempContractRaw?: string | null,
   explicitLaunchPolicy?: CodexLaunchPolicy,
+  selectedCli: OmxCli = "codex",
 ): void {
-  const launchArgs = injectModelInstructionsBypassArgs(
-    cwd,
-    args,
-    process.env,
-    sessionModelInstructionsPath(cwd, sessionId),
-  );
+  const launchArgs = selectedCli === "codex"
+    ? injectModelInstructionsBypassArgs(
+        cwd,
+        args,
+        process.env,
+        sessionModelInstructionsPath(cwd, sessionId),
+      )
+    : [...args];
   const nativeWindows = isNativeWindows();
   const omxBin = resolveOmxEntryPath();
   if (!omxBin) {
@@ -2113,6 +2136,10 @@ function runCodex(
   const codexEnvWithNotify = notifyTempContractRaw
     ? { ...codexEnv, [OMX_NOTIFY_TEMP_CONTRACT_ENV]: notifyTempContractRaw }
     : codexEnv;
+  const versionRequest = isCodexVersionRequest(launchArgs);
+  const leaderLaunchArgs = versionRequest || selectedCli === "codex"
+    ? launchArgs
+    : translateWorkerLaunchArgsForCli(selectedCli, launchArgs);
 
   const launchPolicy = resolveCodexLaunchPolicy(
     process.env,
@@ -2124,8 +2151,8 @@ function runCodex(
     explicitLaunchPolicy,
   );
 
-  if (isCodexVersionRequest(launchArgs)) {
-    runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+  if (versionRequest) {
+    runCodexBlocking(cwd, leaderLaunchArgs, codexEnvWithNotify, selectedCli);
     return;
   }
 
@@ -2175,7 +2202,7 @@ function runCodex(
 
     try {
       withTmuxExtendedKeys(cwd, () => {
-        runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+        runCodexBlocking(cwd, leaderLaunchArgs, codexEnvWithNotify, selectedCli);
       });
     } finally {
       const cleanupPaneIds = buildHudPaneCleanupTargets(
@@ -2190,12 +2217,12 @@ function runCodex(
   } else if (launchPolicy === "direct") {
     // Detached HUD sessions require tmux. Skip the bootstrap entirely when the
     // binary is unavailable so direct launches do not emit noisy ENOENT logs.
-    runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+    runCodexBlocking(cwd, leaderLaunchArgs, codexEnvWithNotify, selectedCli);
   } else {
     // Not in tmux: create a new tmux session with codex + HUD pane
-    const codexCmd = buildTmuxPaneCommand("codex", launchArgs);
+    const codexCmd = buildTmuxPaneCommand(selectedCli, leaderLaunchArgs);
     const detachedWindowsCodexCmd = nativeWindows
-      ? buildWindowsPromptCommand("codex", launchArgs)
+      ? buildWindowsPromptCommand(selectedCli, leaderLaunchArgs)
       : null;
     const sessionName = buildDetachedTmuxSessionName(cwd, sessionId);
     let createdDetachedSession = false;
@@ -2310,7 +2337,7 @@ function runCodex(
         }
       }
       // tmux not available or failed, just run codex directly
-      runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+      runCodexBlocking(cwd, leaderLaunchArgs, codexEnvWithNotify, selectedCli);
     }
   }
 }

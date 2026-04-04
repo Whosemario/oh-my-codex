@@ -1145,6 +1145,7 @@ describe('team worker CLI helpers', () => {
     assert.equal(resolveTeamWorkerCli(['--model', 'claude-3-7-sonnet'], {}), 'claude');
     assert.equal(resolveTeamWorkerCli(['--model=claude-sonnet-4-6'], {}), 'claude');
     assert.equal(resolveTeamWorkerCli(['--model', 'gemini-2.0-pro'], {}), 'gemini');
+    assert.equal(resolveTeamWorkerCli(['--model', 'opencode-gpt-oss-20b'], {}), 'opencode');
     assert.equal(resolveTeamWorkerCli(['--model', 'gpt-5'], {}), 'codex');
     assert.equal(resolveTeamWorkerCli([], {}), 'codex');
   });
@@ -1153,9 +1154,29 @@ describe('team worker CLI helpers', () => {
     assert.equal(resolveTeamWorkerCli([], { OMX_TEAM_WORKER_CLI: 'gemini' }), 'gemini');
   });
 
+  it('resolveTeamWorkerCli accepts explicit opencode override', () => {
+    assert.equal(resolveTeamWorkerCli([], { OMX_TEAM_WORKER_CLI: 'opencode' }), 'opencode');
+  });
+
+  it('resolveTeamWorkerCli prioritizes OMX_CLI over worker-specific settings', () => {
+    assert.equal(
+      resolveTeamWorkerCli(['--model', 'gemini-2.0-pro'], { OMX_CLI: 'opencode', OMX_TEAM_WORKER_CLI: 'gemini' }),
+      'opencode',
+    );
+  });
+
   it('resolveTeamWorkerCliPlan accepts gemini in CLI map', () => {
-    const plan = resolveTeamWorkerCliPlan(3, [], { OMX_TEAM_WORKER_CLI_MAP: 'codex,gemini,claude' });
-    assert.deepEqual(plan, ['codex', 'gemini', 'claude']);
+    const plan = resolveTeamWorkerCliPlan(4, [], { OMX_TEAM_WORKER_CLI_MAP: 'codex,gemini,claude,opencode' });
+    assert.deepEqual(plan, ['codex', 'gemini', 'claude', 'opencode']);
+  });
+
+  it('resolveTeamWorkerCliPlan forces all workers to OMX_CLI when provided', () => {
+    const plan = resolveTeamWorkerCliPlan(
+      3,
+      ['--model', 'claude-3-7-sonnet'],
+      { OMX_CLI: 'opencode', OMX_TEAM_WORKER_CLI_MAP: 'codex,gemini,claude' },
+    );
+    assert.deepEqual(plan, ['opencode', 'opencode', 'opencode']);
   });
 
   it('translateWorkerLaunchArgsForCli preserves args for codex', () => {
@@ -1167,6 +1188,30 @@ describe('team worker CLI helpers', () => {
     assert.deepEqual(
       translateWorkerLaunchArgsForCli('claude', ['-c', 'model_reasoning_effort="xhigh"', '--model', 'claude-3-7-sonnet']),
       ['--dangerously-skip-permissions'],
+    );
+  });
+
+  it('translateWorkerLaunchArgsForCli strips codex-only flags for opencode', () => {
+    assert.deepEqual(
+      translateWorkerLaunchArgsForCli('opencode', ['--dangerously-bypass-approvals-and-sandbox', '--model', 'opencode-gpt-oss-20b']),
+      ['--model', 'opencode-gpt-oss-20b'],
+    );
+  });
+
+  it('translateWorkerLaunchArgsForCli injects default opencode model when missing', () => {
+    assert.deepEqual(
+      translateWorkerLaunchArgsForCli('opencode', ['--dangerously-bypass-approvals-and-sandbox']),
+      ['--model', 'Big Pickle OpenCode Zen'],
+    );
+  });
+
+  it('translateWorkerLaunchArgsForCli drops codex config flags for opencode workers', () => {
+    assert.deepEqual(
+      translateWorkerLaunchArgsForCli(
+        'opencode',
+        ['-c', 'model_instructions_file="/tmp/agents.md"', '--config=model_reasoning_effort="high"', '--yolo'],
+      ),
+      ['--yolo', '--model', 'Big Pickle OpenCode Zen'],
     );
   });
 
@@ -1207,9 +1252,9 @@ describe('team worker CLI helpers', () => {
     const plan = resolveTeamWorkerCliPlan(
       4,
       [],
-      { OMX_TEAM_WORKER_CLI_MAP: 'codex,codex,gemini,claude' },
+      { OMX_TEAM_WORKER_CLI_MAP: 'codex,opencode,gemini,claude' },
     );
-    assert.deepEqual(plan, ['codex', 'codex', 'gemini', 'claude']);
+    assert.deepEqual(plan, ['codex', 'opencode', 'gemini', 'claude']);
   });
 
   it('resolveTeamWorkerCliPlan accepts single-value map and expands to all workers', () => {
@@ -1267,6 +1312,18 @@ describe('team worker CLI helpers', () => {
     assert.equal(
       resolveWorkerCliForSend(2, 'claude', [], { OMX_TEAM_WORKER_CLI_MAP: 'codex,codex' }),
       'claude',
+    );
+  });
+
+  it('resolveWorkerCliForSend prioritizes OMX_CLI over explicit/map/global worker CLI', () => {
+    assert.equal(
+      resolveWorkerCliForSend(
+        2,
+        'claude',
+        [],
+        { OMX_CLI: 'opencode', OMX_TEAM_WORKER_CLI: 'gemini', OMX_TEAM_WORKER_CLI_MAP: 'codex,claude' },
+      ),
+      'opencode',
     );
   });
 

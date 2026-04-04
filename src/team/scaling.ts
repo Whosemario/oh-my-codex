@@ -23,6 +23,7 @@ import {
   teardownWorkerPanes,
   buildWorkerStartupCommand,
   resolveTeamWorkerCliPlan,
+  type TeamWorkerCli,
 } from './tmux-session.js';
 import { execFileSync, spawnSync } from 'child_process';
 import {
@@ -169,7 +170,7 @@ async function notifyWorkerPaneOutcome(
   workerIndex: number,
   message: string,
   paneId?: string,
-  workerCli?: 'codex' | 'claude' | 'gemini',
+  workerCli?: 'codex' | 'claude' | 'gemini' | 'opencode',
 ): Promise<DispatchOutcome> {
   try {
     await sendToWorker(sessionName, workerIndex, message, paneId, workerCli);
@@ -354,7 +355,12 @@ export async function scaleUp(
       const rawRolePromptContent = await loadRolePrompt(workerRole, join(leaderCwd, '.codex', 'prompts'))
         ?? await loadRolePrompt(workerRole, codexPromptsDir());
       const preferredReasoning = resolveAgentReasoningEffort(workerRole) ?? resolveAgentReasoningEffort(agentType);
-      const workerLaunchArgs = resolveWorkerLaunchArgsForScaling(env, workerRole, preferredReasoning);
+      const workerLaunchArgs = resolveWorkerLaunchArgsForScaling(
+        env,
+        workerRole,
+        preferredReasoning,
+        workerCliPlan[i],
+      );
       const resolvedWorkerModel = parseTeamWorkerLaunchArgs(workerLaunchArgs).modelOverride ?? undefined;
       const rolePromptContent = rawRolePromptContent
         ? composeRoleInstructionsForRole(workerRole, rawRolePromptContent, resolvedWorkerModel)
@@ -809,9 +815,12 @@ function resolveWorkerLaunchArgsForScaling(
   env: NodeJS.ProcessEnv,
   agentType: string,
   preferredReasoning?: TeamReasoningEffort,
+  workerCliOverride?: TeamWorkerCli,
 ): string[] {
   const inheritedArgs: string[] = [];
-  const fallbackModel = resolveAgentDefaultModel(agentType, env.CODEX_HOME);
+  const fallbackModel = workerCliOverride === 'opencode'
+    ? undefined
+    : resolveAgentDefaultModel(agentType, env.CODEX_HOME);
 
   return resolveTeamWorkerLaunchArgs({
     existingRaw: env.OMX_TEAM_WORKER_LAUNCH_ARGS,

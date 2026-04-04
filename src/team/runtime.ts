@@ -1197,7 +1197,7 @@ function doesStartupEvidenceSettle(
   evidence: WorkerStartupEvidence,
 ): boolean {
   if (evidence === 'none') return false;
-  if (workerCli === 'codex' && evidence === 'leader_ack') return false;
+  if ((workerCli === 'codex' || workerCli === 'opencode') && evidence === 'leader_ack') return false;
   return true;
 }
 
@@ -1584,7 +1584,7 @@ function spawnPromptWorker(
   workerCwd: string,
   launchArgs: string[],
   workerEnv: Record<string, string>,
-  workerCli: 'codex' | 'claude' | 'gemini',
+  workerCli: 'codex' | 'claude' | 'gemini' | 'opencode',
   initialPrompt?: string,
 ): ChildProcessByStdio<Writable, null, null> {
   const processSpec = buildWorkerProcessLaunchSpec(
@@ -1620,7 +1620,9 @@ export function resolveWorkerLaunchArgsFromEnv(
   const inheritedArgs = (typeof inheritedLeaderModel === 'string' && inheritedLeaderModel.trim() !== '')
     ? ['--model', inheritedLeaderModel.trim()]
     : [];
-  const fallbackModel = resolveAgentDefaultModel(agentType, env.CODEX_HOME);
+  const fallbackModel = workerCliOverride === 'opencode'
+    ? undefined
+    : resolveAgentDefaultModel(agentType, env.CODEX_HOME);
 
   // Detect if an explicit reasoning override exists before resolving (for log source labelling)
   const preEnvArgs = splitWorkerLaunchArgs(env.OMX_TEAM_WORKER_LAUNCH_ARGS);
@@ -1647,6 +1649,8 @@ export function resolveWorkerLaunchArgsFromEnv(
     console.log('[omx:team] worker startup resolution: model=claude source=local-settings');
   } else if (effectiveWorkerCli === 'gemini') {
     console.log('[omx:team] worker startup resolution: model=gemini source=local-settings');
+  } else if (effectiveWorkerCli === 'opencode') {
+    console.log('[omx:team] worker startup resolution: model=opencode source=local-settings');
   } else {
     console.log(`[omx:team] worker startup resolution: model=${resolvedModel} thinking_level=${thinkingLevel} source=${source}`);
   }
@@ -1657,7 +1661,7 @@ export function resolveWorkerLaunchArgsFromEnv(
 function resolveEffectiveWorkerCliForStartupLog(
   resolvedLaunchArgs: string[],
   env: NodeJS.ProcessEnv,
-): 'codex' | 'claude' | 'gemini' {
+): 'codex' | 'claude' | 'gemini' | 'opencode' {
   const rawCliMap = String(env.OMX_TEAM_WORKER_CLI_MAP ?? '').trim();
   if (rawCliMap !== '') {
     const entries = rawCliMap
@@ -1669,14 +1673,16 @@ function resolveEffectiveWorkerCliForStartupLog(
         ...env,
         OMX_TEAM_WORKER_CLI: 'auto',
       });
-      const resolvedMap = entries.map((entry): 'codex' | 'claude' | 'gemini' | null => {
+      const resolvedMap = entries.map((entry): 'codex' | 'claude' | 'gemini' | 'opencode' | null => {
         if (entry === 'auto') return autoCli;
-        if (entry === 'codex' || entry === 'claude' || entry === 'gemini') return entry;
+        if (entry === 'codex' || entry === 'claude' || entry === 'gemini' || entry === 'opencode') return entry;
         return null;
       });
       if (resolvedMap.every((entry) => entry === 'claude')) return 'claude';
       if (resolvedMap.every((entry) => entry === 'gemini')) return 'gemini';
+      if (resolvedMap.every((entry) => entry === 'opencode')) return 'opencode';
       if (resolvedMap.some((entry) => entry === 'codex')) return 'codex';
+      if (resolvedMap.some((entry) => entry === 'opencode')) return 'opencode';
     }
   }
 
@@ -3264,7 +3270,7 @@ async function dispatchCriticalInboxInstruction(params: {
     return { ok: true, transport: 'hook', reason: 'hook_receipt_delivered', request_id: queued.request_id };
   }
   const requiresObservedStartupEvidence = requireWorkerStartupEvidence === true
-    && (workerCli === 'claude' || workerCli === 'codex');
+    && (workerCli === 'claude' || workerCli === 'codex' || workerCli === 'opencode');
   let startupEvidence: WorkerStartupEvidence = 'none';
   if (receipt?.status === 'notified') {
     if (!requiresObservedStartupEvidence) {

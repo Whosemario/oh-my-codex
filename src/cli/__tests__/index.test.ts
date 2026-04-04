@@ -16,6 +16,7 @@ import {
   resolveLeaderLaunchPolicyOverride,
   classifyCodexExecFailure,
   resolveSignalExitCode,
+  resolveOmxCli,
   parseTmuxPaneSnapshot,
   findHudWatchPaneIds,
   buildHudPaneCleanupTargets,
@@ -59,6 +60,24 @@ import type { ProcessEntry } from "../cleanup.js";
 function expectedLowComplexityModel(codexHomeOverride?: string): string {
   return getTeamLowComplexityModel(codexHomeOverride);
 }
+
+describe("resolveOmxCli", () => {
+  it("defaults to codex when OMX_CLI is unset", () => {
+    assert.equal(resolveOmxCli({}), "codex");
+  });
+
+  it("accepts supported OMX_CLI values", () => {
+    assert.equal(resolveOmxCli({ OMX_CLI: "opencode" }), "opencode");
+    assert.equal(resolveOmxCli({ OMX_CLI: " Claude " }), "claude");
+  });
+
+  it("rejects unsupported OMX_CLI values", () => {
+    assert.throws(
+      () => resolveOmxCli({ OMX_CLI: "bad-cli" }),
+      /Invalid OMX_CLI value/i,
+    );
+  });
+});
 
 describe("normalizeCodexLaunchArgs", () => {
   it("maps --madmax to codex bypass flag", () => {
