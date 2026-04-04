@@ -274,6 +274,17 @@ describe('runtime', () => {
     );
   });
 
+  it('resolveWorkerLaunchArgsFromEnv skips codex fallback model for opencode workers', () => {
+    const args = resolveWorkerLaunchArgsFromEnv(
+      { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+      'executor',
+      undefined,
+      undefined,
+      'opencode',
+    );
+    assert.deepEqual(args, ['--no-alt-screen']);
+  });
+
   it('resolveWorkerLaunchArgsFromEnv injects teammate reasoning and logs source=role-default', () => {
     const logs: string[] = [];
     const originalLog = console.log;

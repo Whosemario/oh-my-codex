@@ -20,12 +20,16 @@ describe('runtime-cli helpers', () => {
       ['codex', 'gemini'],
     );
     assert.deepEqual(
-      runtimeCli.normalizeAgentTypes(['gemini'], 3),
-      ['gemini'],
+      runtimeCli.normalizeAgentTypes(['opencode'], 3),
+      ['opencode'],
+    );
+    assert.deepEqual(
+      runtimeCli.normalizeAgentTypes(['codex', 'opencode'], 2),
+      ['codex', 'opencode'],
     );
     assert.throws(
       () => runtimeCli.normalizeAgentTypes(['codex', 'invalid'], 2),
-      /Expected codex\\|claude\\|gemini/,
+      /Expected codex\\|claude\\|gemini\\|opencode/,
     );
   });
 

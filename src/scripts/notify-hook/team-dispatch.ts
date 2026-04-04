@@ -342,6 +342,7 @@ function resolveWorkerCliForRequest(request, config) {
     const worker = workers.find((candidate) => Number(candidate?.index) === idx);
     const workerCli = safeString(worker?.worker_cli).trim().toLowerCase();
     if (workerCli === 'claude') return 'claude';
+    if (workerCli === 'opencode') return 'opencode';
   }
   return 'codex';
 }

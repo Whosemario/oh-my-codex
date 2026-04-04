@@ -44,6 +44,7 @@ const INJECTION_MARKER = '[OMX_TMUX_INJECT]';
 const MODEL_INSTRUCTIONS_FILE_KEY = 'model_instructions_file';
 const OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV = 'OMX_BYPASS_DEFAULT_SYSTEM_PROMPT';
 const OMX_MODEL_INSTRUCTIONS_FILE_ENV = 'OMX_MODEL_INSTRUCTIONS_FILE';
+const OMX_CLI_ENV = 'OMX_CLI';
 const OMX_TEAM_WORKER_CLI_ENV = 'OMX_TEAM_WORKER_CLI';
 const OMX_TEAM_WORKER_CLI_MAP_ENV = 'OMX_TEAM_WORKER_CLI_MAP';
 const OMX_TEAM_WORKER_LAUNCH_MODE_ENV = 'OMX_TEAM_WORKER_LAUNCH_MODE';
@@ -52,10 +53,11 @@ const CLAUDE_SKIP_PERMISSIONS_FLAG = '--dangerously-skip-permissions';
 const GEMINI_PROMPT_INTERACTIVE_FLAG = '-i';
 const GEMINI_APPROVAL_MODE_FLAG = '--approval-mode';
 const GEMINI_APPROVAL_MODE_YOLO = 'yolo';
+const OPENCODE_DEFAULT_MODEL = 'Big Pickle OpenCode Zen';
 const OMX_LEADER_NODE_PATH_ENV = 'OMX_LEADER_NODE_PATH';
 const OMX_LEADER_CLI_PATH_ENV = 'OMX_LEADER_CLI_PATH';
 
-export type TeamWorkerCli = 'codex' | 'claude' | 'gemini';
+export type TeamWorkerCli = 'codex' | 'claude' | 'gemini' | 'opencode';
 type TeamWorkerCliMode = 'auto' | TeamWorkerCli;
 export type TeamWorkerLaunchMode = 'interactive' | 'prompt';
 
@@ -479,8 +481,15 @@ function hasModelInstructionsOverride(args: string[]): boolean {
 function normalizeTeamWorkerCliMode(raw: string | undefined, sourceEnv: string = OMX_TEAM_WORKER_CLI_ENV): TeamWorkerCliMode {
   const normalized = String(raw ?? 'auto').trim().toLowerCase();
   if (normalized === '' || normalized === 'auto') return 'auto';
-  if (normalized === 'codex' || normalized === 'claude' || normalized === 'gemini') return normalized;
-  throw new Error(`Invalid ${sourceEnv} value "${raw}". Expected: auto, codex, claude, gemini`);
+  if (normalized === 'codex' || normalized === 'claude' || normalized === 'gemini' || normalized === 'opencode') return normalized;
+  throw new Error(`Invalid ${sourceEnv} value "${raw}". Expected: auto, codex, claude, gemini, opencode`);
+}
+
+function resolveForcedOmxCli(env: NodeJS.ProcessEnv = process.env): TeamWorkerCli | null {
+  const raw = String(env[OMX_CLI_ENV] ?? '').trim();
+  if (raw === '') return null;
+  const mode = normalizeTeamWorkerCliMode(raw, OMX_CLI_ENV);
+  return mode === 'auto' ? null : mode;
 }
 
 export function resolveTeamWorkerLaunchMode(
@@ -513,6 +522,8 @@ function extractModelOverride(args: string[]): string | null {
 }
 
 export function resolveTeamWorkerCli(launchArgs: string[] = [], env: NodeJS.ProcessEnv = process.env): TeamWorkerCli {
+  const forced = resolveForcedOmxCli(env);
+  if (forced) return forced;
   const mode = normalizeTeamWorkerCliMode(env[OMX_TEAM_WORKER_CLI_ENV]);
   if (mode !== 'auto') return mode;
   return resolveTeamWorkerCliFromLaunchArgs(launchArgs);
@@ -522,6 +533,7 @@ function resolveTeamWorkerCliFromLaunchArgs(launchArgs: string[] = []): TeamWork
   const model = extractModelOverride(launchArgs);
   if (model && /claude/i.test(model)) return 'claude';
   if (model && /gemini/i.test(model)) return 'gemini';
+  if (model && /opencode/i.test(model)) return 'opencode';
   return 'codex';
 }
 
@@ -532,6 +544,11 @@ export function resolveTeamWorkerCliPlan(
 ): TeamWorkerCli[] {
   if (!Number.isInteger(workerCount) || workerCount < 1) {
     throw new Error(`workerCount must be >= 1 (got ${workerCount})`);
+  }
+
+  const forced = resolveForcedOmxCli(env);
+  if (forced) {
+    return Array.from({ length: workerCount }, () => forced);
   }
 
   const rawMap = String(env[OMX_TEAM_WORKER_CLI_MAP_ENV] ?? '').trim();
@@ -550,7 +567,7 @@ export function resolveTeamWorkerCliPlan(
   if (entries.length === 0 || entries.every((part) => part.length === 0)) {
     throw new Error(
       `Invalid ${OMX_TEAM_WORKER_CLI_MAP_ENV} value "${env[OMX_TEAM_WORKER_CLI_MAP_ENV]}". `
-        + `Expected comma-separated values: auto|codex|claude|gemini.`,
+        + `Expected comma-separated values: auto|codex|claude|gemini|opencode.`,
     );
   }
   if (entries.some((part) => part.length === 0)) {
@@ -575,6 +592,21 @@ export function resolveTeamWorkerCliPlan(
 
 export function translateWorkerLaunchArgsForCli(workerCli: TeamWorkerCli, args: string[], initialPrompt?: string): string[] {
   if (workerCli === 'codex') return [...args];
+  if (workerCli === 'opencode') {
+    const translatedArgs: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === CODEX_BYPASS_FLAG) continue;
+      if (arg === CONFIG_FLAG || arg === LONG_CONFIG_FLAG) {
+        i += 1;
+        continue;
+      }
+      if (arg.startsWith(`${LONG_CONFIG_FLAG}=`)) continue;
+      translatedArgs.push(arg);
+    }
+    if (extractModelOverride(translatedArgs)) return translatedArgs;
+    return [...translatedArgs, MODEL_FLAG, OPENCODE_DEFAULT_MODEL];
+  }
   if (workerCli === 'gemini') {
     const model = extractModelOverride(args);
     const geminiModel = model && /gemini/i.test(model) ? model : null;
@@ -630,7 +662,8 @@ export function assertTeamWorkerCliBinaryAvailable(
   if (existsImpl(workerCli)) return;
   throw new Error(
     `Selected team worker CLI "${workerCli}" is not available on PATH. `
-      + `Install "${workerCli}" or set ${OMX_TEAM_WORKER_CLI_ENV}=codex|claude|gemini.`,
+      + `Install "${workerCli}" or set ${OMX_CLI_ENV}=codex|claude|gemini|opencode `
+      + `(or ${OMX_TEAM_WORKER_CLI_ENV}=codex|claude|gemini|opencode).`,
   );
 }
 
@@ -1161,6 +1194,8 @@ export function resolveWorkerCliForSend(
   launchArgs: string[] = [],
   env: NodeJS.ProcessEnv = process.env,
 ): TeamWorkerCli {
+  const forced = resolveForcedOmxCli(env);
+  if (forced) return forced;
   if (workerCli) return workerCli;
   const mapped = resolveWorkerCliFromMapForSend(workerIndex, launchArgs, env);
   if (mapped) return mapped;
@@ -1174,12 +1209,13 @@ export function buildWorkerSubmitPlan(
   allowAdaptiveRetry: boolean,
 ): WorkerSubmitPlan {
   const queueRequested = strategy === 'queue' || (strategy === 'auto' && paneBusyAtStart);
+  const codexLikeWorker = workerCli === 'codex' || workerCli === 'opencode';
   return {
     shouldInterrupt: strategy === 'interrupt',
-    queueFirstRound: workerCli === 'codex' && queueRequested,
+    queueFirstRound: codexLikeWorker && queueRequested,
     rounds: 6,
     submitKeyPressesPerRound: workerCli === 'claude' ? 1 : 2,
-    allowAdaptiveRetry: workerCli === 'codex' && allowAdaptiveRetry,
+    allowAdaptiveRetry: codexLikeWorker && allowAdaptiveRetry,
   };
 }
 
