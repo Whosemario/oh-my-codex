@@ -337,6 +337,17 @@ describe('paneLooksReady', () => {
     assert.equal(paneLooksReady('How can I help you today?'), true);
   });
 
+  it('accepts OpenCode ready landing view', () => {
+    assert.equal(paneLooksReady(`OpenCode
+Ask anything... "Fix a TODO in the codebase"
+Build Big Pickle OpenCode Zen
+● Tip Press Ctrl+C when typing to clear the input field`), true);
+  });
+
+  it('rejects standalone ask-anything text without OpenCode viewport cues', () => {
+    assert.equal(paneLooksReady('Ask anything... while loading provider metadata'), false);
+  });
+
   it('accepts Codex welcome-screen suggestion rows with a prompt glyph', () => {
     assert.equal(paneLooksReady('› Explain this codebase'), true);
   });
