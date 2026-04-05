@@ -272,6 +272,18 @@ function normalizePaneLines(capturedOrLines: any): string[] {
     .filter((line) => line.trim() !== '');
 }
 
+function paneShowsOpenCodeReadyViewport(lines: string[]): boolean {
+  if (lines.length === 0) return false;
+  const hasInputPlaceholder = lines.some((line) => /\bAsk anything\.\.\./i.test(line));
+  if (!hasInputPlaceholder) return false;
+
+  // Keep matching strict enough to avoid false positives from arbitrary prose:
+  // OpenCode splash normally includes the brand token and/or model build row.
+  const hasOpenCodeBrand = lines.some((line) => /\bOpenCode\b/i.test(line));
+  const hasBuildLine = lines.some((line) => /^\s*Build\b.*\bOpenCode\b/i.test(line));
+  return hasOpenCodeBrand || hasBuildLine;
+}
+
 export function paneIsBootstrapping(capturedOrLines: any): boolean {
   const lines = normalizePaneLines(capturedOrLines);
   return lines.some((line) =>
@@ -298,6 +310,8 @@ export function paneLooksReady(captured: any): boolean {
 
   const hasCodexWelcomePrompt = lines.some((line) => /\bhow can i help(?: you)?\b/i.test(line));
   if (hasCodexWelcomePrompt) return true;
+
+  if (paneShowsOpenCodeReadyViewport(lines)) return true;
 
   return lines.some((line) => /^\s*(?:[›>❯]\s*)?[A-Z][A-Z0-9]+-\d+\s+only(?:\s*(?:…|\.{3}))?\s*$/iu.test(line));
 }

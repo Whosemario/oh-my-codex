@@ -108,6 +108,11 @@ const VIEWPORT_SCROLLBACK_READY_CAPTURE = `${VIEWPORT_WITHOUT_VISIBLE_PROMPT_CAP
 
 › support lane on multi-image attach`;
 
+const OPENCODE_READY_CAPTURE = `OpenCode
+Ask anything... "Fix a TODO in the codebase"
+Build Big Pickle OpenCode Zen
+● Tip Press Ctrl+C when typing to clear the input field`;
+
 async function withMockTmuxFixture<T>(
   dirPrefix: string,
   tmuxScript: (tmuxLogPath: string) => string,
@@ -1733,6 +1738,32 @@ esac
 `,
       async () => {
         assert.equal(waitForWorkerReady('omx-team-x', 1, 1_000), true);
+      },
+    );
+  });
+
+  it('waitForWorkerReady accepts OpenCode landing view as ready', async () => {
+    await withMockTmuxFixture(
+      'omx-tmux-worker-ready-opencode-',
+      (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    cat <<'EOF'
+${OPENCODE_READY_CAPTURE}
+EOF
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+      async ({ logPath }) => {
+        assert.equal(waitForWorkerReady('omx-team-x', 1, 1_000), true);
+        const log = await readFile(logPath, 'utf-8');
+        assert.match(log, /capture-pane -t omx-team-x:1 -p/);
       },
     );
   });
