@@ -9,6 +9,7 @@ pub mod python;
 pub mod ruby;
 pub mod rust;
 pub mod swift;
+pub mod svn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandFamily {
@@ -19,9 +20,10 @@ pub struct CommandFamily {
     pub what_it_does: &'static str,
 }
 
-const FAMILIES: [&CommandFamily; 11] = [
+const FAMILIES: [&CommandFamily; 12] = [
     &generic_shell::FAMILY,
     &git::FAMILY,
+    &svn::FAMILY,
     &node_js::FAMILY,
     &python::FAMILY,
     &rust::FAMILY,

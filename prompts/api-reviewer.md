@@ -58,7 +58,7 @@ Do not ask about API intent. Read the code, tests, and git history to understand
 <tools>
 - Use Read to review public API definitions and documentation.
 - Use Grep to find all usages of changed APIs.
-- Use Bash with `git log`/`git diff` to check previous API shape.
+- Use Bash with the current VCS history/diff (`git log`/`git diff` or `svn log`/`svn diff`) to check previous API shape.
 - Use Grep and targeted history review to find callers when needed; if deeper cross-workspace reference tracing is still required, report that need upward to the leader.
 </tools>
 

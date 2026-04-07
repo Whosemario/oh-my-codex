@@ -54,6 +54,13 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'rev-parse',
 ]);
 
+const READ_ONLY_SVN_SUBCOMMANDS = new Set([
+  'info',
+  'status',
+  'diff',
+  'log',
+]);
+
 const SHELL_ROUTE_DISALLOWED_PATTERN = /[|&;><`$()]/;
 const EXPLICIT_SHELL_PREFIX_PATTERN = /^run\s+/i;
 
@@ -88,10 +95,22 @@ function isReadOnlyGitArgs(args: readonly string[]): boolean {
   return true;
 }
 
+function isReadOnlySvnArgs(args: readonly string[]): boolean {
+  const subcommand = args[1]?.toLowerCase();
+  if (!subcommand || !READ_ONLY_SVN_SUBCOMMANDS.has(subcommand)) return false;
+  if (subcommand === 'diff') {
+    return !args.some((arg) => arg === '--summarize' || arg === '--accept');
+  }
+  return true;
+}
+
 function classifyLongOutputShellCommand(args: readonly string[]): boolean {
   const [command, subcommand] = args;
   if (command === 'git') {
     return ['log', 'diff', 'status', 'show'].includes((subcommand || '').toLowerCase());
+  }
+  if (command === 'svn') {
+    return ['log', 'diff', 'status'].includes((subcommand || '').toLowerCase());
   }
   return ['find', 'ls', 'rg', 'grep'].includes(command);
 }
@@ -106,6 +125,13 @@ export function resolveExploreSparkShellRoute(prompt: string): ExploreSparkShell
   if (!command) return undefined;
 
   if (command === 'git' && isReadOnlyGitArgs(argv)) {
+    return {
+      argv,
+      reason: classifyLongOutputShellCommand(argv) ? 'long-output' : 'shell-native',
+    };
+  }
+
+  if (command === 'svn' && isReadOnlySvnArgs(argv)) {
     return {
       argv,
       reason: classifyLongOutputShellCommand(argv) ? 'long-output' : 'shell-native',

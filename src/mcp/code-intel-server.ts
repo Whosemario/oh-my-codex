@@ -496,7 +496,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Determine project root from file
       let dir = file ? join(file, '..') : process.cwd();
       for (let i = 0; i < 10; i++) {
-        if (existsSync(join(dir, 'package.json')) || existsSync(join(dir, '.git'))) break;
+        if (existsSync(join(dir, 'package.json')) || existsSync(join(dir, '.git')) || existsSync(join(dir, '.svn'))) break;
         const parent = join(dir, '..');
         if (parent === dir) break;
         dir = parent;
@@ -551,7 +551,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Use grep to find references
       let dir = join(file, '..');
       for (let i = 0; i < 10; i++) {
-        if (existsSync(join(dir, 'package.json')) || existsSync(join(dir, '.git'))) break;
+        if (existsSync(join(dir, 'package.json')) || existsSync(join(dir, '.git')) || existsSync(join(dir, '.svn'))) break;
         const parent = join(dir, '..');
         if (parent === dir) break;
         dir = parent;

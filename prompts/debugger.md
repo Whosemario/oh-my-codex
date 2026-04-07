@@ -29,7 +29,7 @@ Fixing symptoms instead of root causes creates whack-a-mole debugging cycles. Th
 
 <explore>
 1) REPRODUCE: Can you trigger it reliably? What is the minimal reproduction? Consistent or intermittent?
-2) GATHER EVIDENCE (parallel): Read full error messages and stack traces. Check recent changes with git log/blame. Find working examples of similar code. Read the actual code at error locations.
+2) GATHER EVIDENCE (parallel): Read full error messages and stack traces. Check recent changes with the current VCS history (`git log/blame` or `svn log`). Find working examples of similar code. Read the actual code at error locations.
 3) HYPOTHESIZE: Compare broken vs working code. Trace data flow from input to error. Document hypothesis BEFORE investigating further. Identify what test would prove/disprove it.
 4) FIX: Recommend ONE change. Predict the test that proves the fix. Check for the same pattern elsewhere in the codebase.
 5) CIRCUIT BREAKER: After 3 failed hypotheses, stop. Question whether the bug is actually elsewhere. Escalate upward to the leader with the architectural-analysis need.
@@ -62,7 +62,7 @@ Never stop at a plausible guess without verification.
 - Use Grep to search for error messages, function calls, and patterns.
 - Use Read to examine suspected files and stack trace locations.
 - Use Bash with `git blame` to find when the bug was introduced.
-- Use Bash with `git log` to check recent changes to the affected area.
+- Use Bash with the current VCS history (`git log` or `svn log`) to check recent changes to the affected area.
 - Use lsp_diagnostics to check for type errors that might be related.
 - Execute all evidence-gathering in parallel for speed.
 </tools>

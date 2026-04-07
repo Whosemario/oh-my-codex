@@ -1,9 +1,10 @@
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { existsSync } from 'fs';
-import { readFile, readdir } from 'fs/promises';
+import { readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import type { TeamTaskStatus } from '../contracts.js';
 import type {
+  TeamConfig,
   TeamTask,
   TeamTaskV2,
   TaskReadiness,
@@ -13,6 +14,14 @@ import type {
   ReclaimTaskResult,
   TeamMonitorSnapshotState,
 } from './types.js';
+
+interface SharedWorkspaceLockRecord {
+  task_id: string;
+  worker: string;
+  acquired_at: string;
+}
+
+const SHARED_WORKSPACE_LOCK_STALE_MS = 15 * 60 * 1000;
 
 interface TaskReadDeps {
   readTask: (teamName: string, taskId: string, cwd: string) => Promise<TeamTask | null>;
@@ -45,12 +54,83 @@ export async function computeTaskReadiness(
 interface ClaimTaskDeps extends TaskReadDeps {
   teamName: string;
   cwd: string;
-  readTeamConfig: (teamName: string, cwd: string) => Promise<{ workers: Array<{ name: string }> } | null>;
+  readTeamConfig: (teamName: string, cwd: string) => Promise<TeamConfig | null>;
   withTaskClaimLock: <T>(teamName: string, taskId: string, cwd: string, fn: () => Promise<T>) => Promise<{ ok: true; value: T } | { ok: false }>;
   normalizeTask: (task: TeamTask) => TeamTaskV2;
   isTerminalTaskStatus: (status: TeamTaskStatus) => boolean;
   taskFilePath: (teamName: string, taskId: string, cwd: string) => string;
+  workspaceLockPath: (teamName: string, cwd: string) => string;
+  listTasks: (teamName: string, cwd: string) => Promise<TeamTask[]>;
   writeAtomic: (path: string, data: string) => Promise<void>;
+}
+
+function requiresSharedWorkspaceWriteLock(cfg: TeamConfig | null | undefined, task: TeamTaskV2): boolean {
+  return cfg?.workspace_mode === 'shared'
+    && cfg.workspace_vcs_kind === 'svn'
+    && task.requires_code_change === true;
+}
+
+async function acquireSharedWorkspaceWriteLock(
+  taskId: string,
+  workerName: string,
+  deps: ClaimTaskDeps,
+): Promise<boolean> {
+  const lockPath = deps.workspaceLockPath(deps.teamName, deps.cwd);
+  const payload: SharedWorkspaceLockRecord = {
+    task_id: taskId,
+    worker: workerName,
+    acquired_at: new Date().toISOString(),
+  };
+
+  try {
+    await writeFile(lockPath, JSON.stringify(payload, null, 2), { encoding: 'utf-8', flag: 'wx' });
+    return true;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== 'EEXIST') throw error;
+  }
+
+  try {
+    const info = await stat(lockPath);
+    if ((Date.now() - info.mtimeMs) > SHARED_WORKSPACE_LOCK_STALE_MS) {
+      await rm(lockPath, { force: true });
+      await writeFile(lockPath, JSON.stringify(payload, null, 2), { encoding: 'utf-8', flag: 'wx' });
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  const tasks = await deps.listTasks(deps.teamName, deps.cwd);
+  const activeWriter = tasks.find((task) => task.status === 'in_progress' && task.requires_code_change === true);
+  if (!activeWriter) {
+    try {
+      await rm(lockPath, { force: true });
+      await writeFile(lockPath, JSON.stringify(payload, null, 2), { encoding: 'utf-8', flag: 'wx' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+async function releaseSharedWorkspaceWriteLock(
+  taskId: string,
+  deps: Pick<ClaimTaskDeps, 'teamName' | 'cwd' | 'workspaceLockPath'>,
+): Promise<void> {
+  const lockPath = deps.workspaceLockPath(deps.teamName, deps.cwd);
+  if (!existsSync(lockPath)) return;
+
+  try {
+    const parsed = JSON.parse(await readFile(lockPath, 'utf-8')) as Partial<SharedWorkspaceLockRecord>;
+    if (parsed.task_id && parsed.task_id !== taskId) return;
+  } catch {
+    // Best effort cleanup.
+  }
+
+  await rm(lockPath, { force: true });
 }
 
 export async function claimTask(
@@ -96,6 +176,10 @@ export async function claimTask(
     }
 
     const claimToken = randomUUID();
+    if (requiresSharedWorkspaceWriteLock(cfg, v)) {
+      const lockAcquired = await acquireSharedWorkspaceWriteLock(taskId, workerName, deps);
+      if (!lockAcquired) return { ok: false as const, error: 'claim_conflict' as const };
+    }
     const updated: TeamTaskV2 = {
       ...v,
       status: 'in_progress',
@@ -165,6 +249,9 @@ export async function transitionTaskStatus(
       version: v.version + 1,
     };
     await deps.writeAtomic(deps.taskFilePath(deps.teamName, taskId, deps.cwd), JSON.stringify(updated, null, 2));
+    if (requiresSharedWorkspaceWriteLock(await deps.readTeamConfig(deps.teamName, deps.cwd), v)) {
+      await releaseSharedWorkspaceWriteLock(taskId, deps);
+    }
 
     if (to === 'completed') {
       await deps.appendTeamEvent(
@@ -233,6 +320,9 @@ export async function releaseTaskClaim(
       version: v.version + 1,
     };
     await deps.writeAtomic(deps.taskFilePath(deps.teamName, taskId, deps.cwd), JSON.stringify(updated, null, 2));
+    if (requiresSharedWorkspaceWriteLock(await deps.readTeamConfig(deps.teamName, deps.cwd), v)) {
+      await releaseSharedWorkspaceWriteLock(taskId, deps);
+    }
     return { ok: true as const, task: updated };
   });
 
@@ -262,6 +352,9 @@ export async function reclaimExpiredTaskClaim(
       version: v.version + 1,
     };
     await deps.writeAtomic(deps.taskFilePath(deps.teamName, taskId, deps.cwd), JSON.stringify(updated, null, 2));
+    if (requiresSharedWorkspaceWriteLock(await deps.readTeamConfig(deps.teamName, deps.cwd), v)) {
+      await releaseSharedWorkspaceWriteLock(taskId, deps);
+    }
     return { ok: true as const, task: updated, reclaimed: true };
   });
 

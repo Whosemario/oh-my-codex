@@ -34,11 +34,12 @@ function isCurrentSessionMetrics(ctx: HudRenderContext): boolean {
 // Element Renderers
 // ============================================================================
 
-function renderGitBranch(ctx: HudRenderContext): string | null {
-  if (!ctx.gitBranch) return null;
-  const gitBranch = sanitizeDynamicText(ctx.gitBranch);
-  if (!gitBranch) return null;
-  return cyan(gitBranch);
+function renderVcsRef(ctx: HudRenderContext): string | null {
+  const ref = ctx.vcsRef ?? ctx.gitBranch;
+  if (!ref) return null;
+  const vcsRef = sanitizeDynamicText(ref);
+  if (!vcsRef) return null;
+  return cyan(vcsRef);
 }
 
 function renderRalph(ctx: HudRenderContext): string | null {
@@ -170,7 +171,7 @@ function renderSessionDuration(ctx: HudRenderContext): string | null {
 type ElementRenderer = (ctx: HudRenderContext) => string | null;
 
 const MINIMAL_ELEMENTS: ElementRenderer[] = [
-  renderGitBranch,
+  renderVcsRef,
   renderRalph,
   renderUltrawork,
   renderRalplan,
@@ -182,7 +183,7 @@ const MINIMAL_ELEMENTS: ElementRenderer[] = [
 ];
 
 const FOCUSED_ELEMENTS: ElementRenderer[] = [
-  renderGitBranch,
+  renderVcsRef,
   renderRalph,
   renderUltrawork,
   renderAutopilot,
@@ -199,7 +200,7 @@ const FOCUSED_ELEMENTS: ElementRenderer[] = [
 ];
 
 const FULL_ELEMENTS: ElementRenderer[] = [
-  renderGitBranch,
+  renderVcsRef,
   renderRalph,
   renderUltrawork,
   renderAutopilot,

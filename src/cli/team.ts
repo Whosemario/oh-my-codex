@@ -24,6 +24,7 @@ import {
 } from '../team/api-interop.js';
 import { teamReadConfig as readTeamConfig, teamReadTaskApproval as readTaskApproval } from '../team/team-ops.js';
 import { recordLeaderRuntimeActivity } from '../team/leader-activity.js';
+import { detectWorkspace } from '../vcs/index.js';
 
 type TeamWorkerCli = Exclude<WorkerInfo['worker_cli'], undefined>;
 
@@ -129,8 +130,9 @@ Usage: omx team [N:agent-type] "<task description>"
        omx team api --help
 
 Notes:
-  team workers use dedicated worktrees automatically by default.
-  --worktree is deprecated for omx team and is now only a backward-compatible no-op override.
+  Git projects default to isolated worker worktrees.
+  SVN projects use a shared working copy with single-writer coordination for code changes.
+  --worktree is Git-only and remains a backward-compatible no-op override for omx team.
   use native Codex subagents for small in-session fanout; use omx team for durable tmux/state/worktree coordination.
 
 Examples:
@@ -2068,6 +2070,9 @@ async function renderStartSummary(runtime: TeamRuntime, staffingPlan?: FollowupS
   if (runtime.config.workspace_mode) {
     console.log(`workspace_mode: ${runtime.config.workspace_mode}`);
   }
+  if (runtime.config.workspace_vcs_kind) {
+    console.log(`workspace_vcs_kind: ${runtime.config.workspace_vcs_kind}`);
+  }
   if (staffingPlan) {
     console.log(`available_agent_types: ${staffingPlan.rosterSummary}`);
     console.log(`staffing_plan: ${staffingPlan.staffingSummary}`);
@@ -2099,8 +2104,12 @@ export function buildLeaderMonitoringHints(teamName: string): string[] {
 
 export async function teamCommand(args: string[], _options: TeamCliOptions = {}): Promise<void> {
   const cwd = process.cwd();
+  const workspace = detectWorkspace(cwd);
   const parsedWorktree = parseWorktreeMode(args);
   const worktreeMode = resolveDefaultTeamWorktreeMode(parsedWorktree.mode);
+  if (workspace.kind === 'svn' && parsedWorktree.mode.enabled) {
+    console.log('note: --worktree is ignored for SVN projects; omx team uses shared-working-copy mode.');
+  }
   const teamArgs = parsedWorktree.remainingArgs;
   const [subcommandRaw] = teamArgs;
   const subcommand = (subcommandRaw || '').toLowerCase();
@@ -2202,6 +2211,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
         tail_lines: tailLines,
         phase: snapshot.phase,
         workspace_mode: config?.workspace_mode ?? null,
+        workspace_vcs_kind: config?.workspace_vcs_kind ?? null,
         dead_workers: snapshot.deadWorkers,
         non_reporting_workers: snapshot.nonReportingWorkers,
         workers: {
@@ -2225,6 +2235,9 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
     console.log(`team=${snapshot.teamName} phase=${snapshot.phase}`);
     if (config?.workspace_mode) {
       console.log(`workspace_mode: ${config.workspace_mode}`);
+    }
+    if (config?.workspace_vcs_kind) {
+      console.log(`workspace_vcs_kind: ${config.workspace_vcs_kind}`);
     }
     console.log(`workers: total=${snapshot.workers.length} dead=${snapshot.deadWorkers.length} non_reporting=${snapshot.nonReportingWorkers.length}`);
     if (snapshot.deadWorkers.length > 0) {

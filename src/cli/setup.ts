@@ -52,6 +52,7 @@ import {
   upsertAgentsModelTable,
 } from "../utils/agents-model-table.js";
 import { spawnPlatformCommandSync } from "../utils/platform-command.js";
+import { detectWorkspace } from "../vcs/index.js";
 
 interface SetupOptions {
   codexVersionProbe?: () => string | null;
@@ -593,6 +594,59 @@ async function ensureProjectGitignore(
   return destinationExists ? "updated" : "created";
 }
 
+function readSvnIgnore(projectRoot: string): string {
+  const result = spawnSync("svn", ["propget", "svn:ignore", projectRoot], {
+    cwd: projectRoot,
+    encoding: "utf-8",
+    windowsHide: true,
+  });
+  return result.status === 0 ? (result.stdout || "") : "";
+}
+
+async function ensureProjectSvnIgnore(
+  projectRoot: string,
+  options: Pick<SetupOptions, "dryRun" | "verbose">,
+): Promise<"created" | "updated" | "unchanged" | "skipped"> {
+  const workspace = detectWorkspace(projectRoot);
+  if (workspace.kind !== "svn" || !workspace.root) {
+    return "skipped";
+  }
+  if (workspace.root !== projectRoot) {
+    console.log("  Skipped svn:ignore update because current directory is not the SVN working-copy root.\n");
+    return "skipped";
+  }
+
+  const existing = readSvnIgnore(projectRoot);
+  const missingEntries = PROJECT_GITIGNORE_ENTRIES
+    .map((entry) => entry.replace(/\/$/, ""))
+    .filter((entry) => !hasGitignoreEntry(existing, entry));
+
+  if (missingEntries.length === 0) {
+    return "unchanged";
+  }
+
+  const nextContent = `${existing}${existing.endsWith("\n") || existing.length === 0 ? "" : "\n"}${missingEntries.join("\n")}\n`;
+  if (!options.dryRun) {
+    const result = spawnSync("svn", ["propset", "svn:ignore", nextContent, projectRoot], {
+      cwd: projectRoot,
+      encoding: "utf-8",
+      windowsHide: true,
+    });
+    if (result.status !== 0) {
+      const message = (result.stderr || result.stdout || "").trim() || "unknown svn propset failure";
+      console.log(`  Skipped svn:ignore update: ${message}\n`);
+      return "skipped";
+    }
+  }
+
+  if (options.verbose) {
+    console.log(
+      `  ${options.dryRun ? "would update" : "updated"} svn:ignore (${missingEntries.join(", ")})`,
+    );
+  }
+  return existing.trim().length > 0 ? "updated" : "created";
+}
+
 async function persistSetupScope(
   projectRoot: string,
   scope: SetupScope,
@@ -655,19 +709,33 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   console.log("  Done.\n");
 
   if (resolvedScope.scope === "project") {
-    const gitignoreResult = await ensureProjectGitignore(
-      projectRoot,
-      backupContext,
-      { dryRun, verbose },
-    );
-    if (gitignoreResult === "created") {
-      console.log(
-        "  Created .gitignore with .omx/ and .codex/ so local OMX runtime/config state stays out of source control.\n",
+    const workspace = detectWorkspace(projectRoot);
+    if (workspace.kind === "svn") {
+      const svnIgnoreResult = await ensureProjectSvnIgnore(projectRoot, { dryRun, verbose });
+      if (svnIgnoreResult === "created") {
+        console.log(
+          "  Created svn:ignore entries for .omx and .codex so local OMX runtime/config state stays out of source control.\n",
+        );
+      } else if (svnIgnoreResult === "updated") {
+        console.log(
+          "  Added .omx and/or .codex to svn:ignore so local OMX runtime/config state stays out of source control.\n",
+        );
+      }
+    } else {
+      const gitignoreResult = await ensureProjectGitignore(
+        projectRoot,
+        backupContext,
+        { dryRun, verbose },
       );
-    } else if (gitignoreResult === "updated") {
-      console.log(
-        "  Added .omx/ and/or .codex/ to .gitignore so local OMX runtime/config state stays out of source control.\n",
-      );
+      if (gitignoreResult === "created") {
+        console.log(
+          "  Created .gitignore with .omx/ and .codex/ so local OMX runtime/config state stays out of source control.\n",
+        );
+      } else if (gitignoreResult === "updated") {
+        console.log(
+          "  Added .omx/ and/or .codex/ to .gitignore so local OMX runtime/config state stays out of source control.\n",
+        );
+      }
     }
   }
 

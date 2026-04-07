@@ -23,6 +23,12 @@ const GIT: CommandFamily = CommandFamily {
     description: "Git porcelain and repository inspection commands.",
     what_it_does: "Reads or changes repository state, history, branches, or working tree diffs.",
 };
+const SVN: CommandFamily = CommandFamily {
+    key: "svn",
+    pattern: "svn",
+    description: "Subversion working-copy and repository inspection commands.",
+    what_it_does: "Reads working-copy state, diffs, repository info, and revision history.",
+};
 const NODE_JS: CommandFamily = CommandFamily {
     key: "node-js",
     pattern: "npm|npx|pnpm|yarn|bun|node",
@@ -87,6 +93,7 @@ pub fn select_command_family(command: &str) -> &'static CommandFamily {
     let base = command_basename(command);
     match base.as_ref() {
         "git" => &GIT,
+        "svn" => &SVN,
         "npm" | "npx" | "pnpm" | "yarn" | "bun" | "node" => &NODE_JS,
         "python" | "python3" | "pip" | "uv" | "poetry" | "pytest" => &PYTHON,
         "cargo" | "rustc" => &RUST,

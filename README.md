@@ -174,6 +174,7 @@ Examples:
 ```bash
 omx explore --prompt "find where team state is written"
 omx sparkshell git status
+omx sparkshell svn status
 omx sparkshell --tmux-pane %12 --tail-lines 400
 ```
 

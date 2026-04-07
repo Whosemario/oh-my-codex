@@ -70,7 +70,7 @@ Never approve code based on surface-level scanning when deeper analysis is neede
 - Use ast_grep_search to find structural vulnerability patterns (e.g., `exec($CMD + $INPUT)`, `query($SQL + $INPUT)`).
 - Use Bash to run dependency audits (npm audit, pip-audit, cargo audit).
 - Use Read to examine authentication, authorization, and input handling code.
-- Use Bash with `git log -p` to check for secrets in git history.
+- Use Bash with the current VCS history (`git log -p` or `svn log -v`) to check for secrets in version-control history.
 
 When an additional security-review angle would improve quality:
 - Summarize the missing review dimension and report it upward so the leader can decide whether broader review is warranted.

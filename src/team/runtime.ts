@@ -122,12 +122,12 @@ import {
 import {
   assertCleanLeaderWorkspaceForWorkerWorktrees,
   ensureWorktree,
-  isGitRepository,
   planWorktreeTarget,
   rollbackProvisionedWorktrees,
   type EnsureWorktreeResult,
   type WorktreeMode,
 } from './worktree.js';
+import { detectWorkspace } from '../vcs/index.js';
 
 /** Snapshot of the team state at a point in time */
 export interface TeamSnapshot {
@@ -924,7 +924,7 @@ function resolveEffectiveTeamWorktreeMode(
   leaderCwd: string,
   requestedMode: WorktreeMode | undefined,
 ): WorktreeMode {
-  if (!isGitRepository(leaderCwd)) {
+  if (detectWorkspace(leaderCwd).kind !== 'git') {
     return { enabled: false };
   }
 
@@ -1553,6 +1553,7 @@ export async function startTeam(
 ): Promise<TeamRuntime> {
   const leaderCwd = resolve(cwd);
   await assertNestedTeamAllowed(leaderCwd);
+  const workspace = detectWorkspace(leaderCwd);
   const effectiveWorktreeMode = resolveEffectiveTeamWorktreeMode(leaderCwd, options.worktreeMode);
 
   const workerLaunchMode = resolveTeamWorkerLaunchMode(process.env);
@@ -1572,7 +1573,11 @@ export async function startTeam(
     effectiveWorktreeMode.enabled
       ? (effectiveWorktreeMode.detached ? 'detached' : 'named')
       : null;
-  const workspaceMode: 'single' | 'worktree' = activeWorktreeMode ? 'worktree' : 'single';
+  const workspaceMode: 'single' | 'worktree' | 'shared' = activeWorktreeMode
+    ? 'worktree'
+    : workspace.kind === 'svn'
+      ? 'shared'
+      : 'single';
   const workerWorkspaceByName = new Map<string, {
     cwd: string;
     worktreeRepoRoot?: string;
@@ -1650,6 +1655,7 @@ export async function startTeam(
         leader_cwd: leaderCwd,
         team_state_root: teamStateRoot,
         workspace_mode: workspaceMode,
+        workspace_vcs_kind: workspace.kind,
         worktree_mode: effectiveWorktreeMode,
       },
       'default',
@@ -1660,6 +1666,7 @@ export async function startTeam(
     config.leader_cwd = leaderCwd;
     config.team_state_root = teamStateRoot;
     config.workspace_mode = workspaceMode;
+    config.workspace_vcs_kind = workspace.kind;
     config.worktree_mode = effectiveWorktreeMode;
 
     // 4. Create tasks

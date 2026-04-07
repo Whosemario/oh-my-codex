@@ -6,14 +6,18 @@
 
 import { readFile } from 'fs/promises';
 import { readFileSync } from 'fs';
-import { execSync } from 'child_process';
-import { join, dirname, basename } from 'path';
+import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { omxStateDir } from '../utils/paths.js';
-import { findGitLayout, readGitLayoutFile } from '../utils/git-layout.js';
 import { getDefaultBridge, isBridgeEnabled } from '../runtime/bridge.js';
 import type { RuntimeSnapshot } from '../runtime/bridge.js';
 import { getReadScopedStatePaths } from '../mcp/state-paths.js';
+import {
+  getDisplayRef,
+  readGitBranchName,
+  runGit,
+  type GitRunner,
+} from '../vcs/index.js';
 import type {
   RalphStateForHud,
   UltraworkStateForHud,
@@ -68,6 +72,9 @@ function sanitizeOptionalString(value: unknown): string | undefined {
 export function normalizeHudConfig(raw: HudConfig | null | undefined): ResolvedHudConfig {
   const normalized: ResolvedHudConfig = {
     preset: DEFAULT_HUD_CONFIG.preset,
+    vcs: {
+      ...(DEFAULT_HUD_CONFIG.vcs ?? DEFAULT_HUD_CONFIG.git),
+    },
     git: {
       ...DEFAULT_HUD_CONFIG.git,
     },
@@ -79,16 +86,41 @@ export function normalizeHudConfig(raw: HudConfig | null | undefined): ResolvedH
     normalized.preset = raw.preset;
   }
 
+  const readCompatVcsConfig = (candidate: { display?: unknown; remoteName?: unknown; repoLabel?: unknown } | undefined): void => {
+    if (!candidate || typeof candidate !== 'object') return;
+    const vcs = normalized.vcs ?? (normalized.vcs = { ...(DEFAULT_HUD_CONFIG.vcs ?? DEFAULT_HUD_CONFIG.git) });
+    if (isValidGitDisplay(candidate.display)) {
+      vcs.display = candidate.display;
+    }
+
+    const remoteName = sanitizeOptionalString(candidate.remoteName);
+    if (remoteName) vcs.remoteName = remoteName;
+
+    const repoLabel = sanitizeOptionalString(candidate.repoLabel);
+    if (repoLabel) vcs.repoLabel = repoLabel;
+  };
+
+  if (raw.vcs && typeof raw.vcs === 'object') {
+    readCompatVcsConfig(raw.vcs);
+  }
+
   if (raw.git && typeof raw.git === 'object') {
     if (isValidGitDisplay(raw.git.display)) {
       normalized.git.display = raw.git.display;
+      if (!raw.vcs) (normalized.vcs ?? (normalized.vcs = { ...(DEFAULT_HUD_CONFIG.vcs ?? DEFAULT_HUD_CONFIG.git) })).display = raw.git.display;
     }
 
     const remoteName = sanitizeOptionalString(raw.git.remoteName);
-    if (remoteName) normalized.git.remoteName = remoteName;
+    if (remoteName) {
+      normalized.git.remoteName = remoteName;
+      if (!raw.vcs?.remoteName) (normalized.vcs ?? (normalized.vcs = { ...(DEFAULT_HUD_CONFIG.vcs ?? DEFAULT_HUD_CONFIG.git) })).remoteName = remoteName;
+    }
 
     const repoLabel = sanitizeOptionalString(raw.git.repoLabel);
-    if (repoLabel) normalized.git.repoLabel = repoLabel;
+    if (repoLabel) {
+      normalized.git.repoLabel = repoLabel;
+      if (!raw.vcs?.repoLabel) (normalized.vcs ?? (normalized.vcs = { ...(DEFAULT_HUD_CONFIG.vcs ?? DEFAULT_HUD_CONFIG.git) })).repoLabel = repoLabel;
+    }
   }
 
   return normalized;
@@ -174,86 +206,14 @@ export function readVersion(): string | null {
   }
 }
 
-export type GitRunner = (cwd: string, args: string[]) => string | null;
-
-/**
- * On Windows, read common git queries directly from .git/ files to avoid
- * spawning console windows (conhost.exe flicker).  Falls back to execSync
- * for non-Windows platforms or unrecognised arguments.
- *
- * See: https://github.com/Yeachan-Heo/oh-my-codex/issues/1100
- */
-function runGit(cwd: string, args: string[]): string | null {
-  if (process.platform === 'win32') {
-    try {
-      const gitLayout = findGitLayout(cwd);
-      if (gitLayout) {
-        const cmd = args.join(' ');
-
-        if (cmd === 'rev-parse --abbrev-ref HEAD') {
-          const head = readGitLayoutFile(gitLayout.gitDir, 'HEAD');
-          if (head?.startsWith('ref: refs/heads/'))
-            return head.slice('ref: refs/heads/'.length);
-          return head; // detached HEAD — raw SHA
-        }
-
-        if (cmd.startsWith('remote get-url ')) {
-          const remoteName = args[2];
-          const config = readGitLayoutFile(gitLayout.gitDir, 'config')
-            ?? readGitLayoutFile(gitLayout.commonDir, 'config');
-          if (config) {
-            const re = new RegExp(
-              `\\[remote "${remoteName}"\\][\\s\\S]*?url\\s*=\\s*(.+)`,
-              'm',
-            );
-            const m = config.match(re);
-            if (m) return m[1].trim();
-          }
-          return null;
-        }
-
-        if (cmd === 'remote') {
-          const config = readGitLayoutFile(gitLayout.gitDir, 'config')
-            ?? readGitLayoutFile(gitLayout.commonDir, 'config');
-          if (config) {
-            const matches = [...config.matchAll(/\[remote "([^"]+)"\]/g)];
-            if (matches.length > 0) return matches.map((m) => m[1]).join('\n');
-          }
-          return null;
-        }
-
-        if (cmd === 'rev-parse --show-toplevel') {
-          return gitLayout.worktreeRoot;
-        }
-      }
-    } catch { /* fall through to execSync */ }
-  }
-
-  return runGitExec(cwd, args);
-}
-
-function runGitExec(cwd: string, args: string[]): string | null {
-  try {
-    return execSync(`git ${args.join(' ')}`, {
-      cwd,
-      encoding: 'utf-8',
-      timeout: 2000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    }).trim() || null;
-  } catch {
-    return null;
-  }
+export function readGitBranch(cwd: string): string | null {
+  return readGitBranchName(cwd, runGit);
 }
 
 function extractRepoName(remoteUrl: string | null): string | null {
   if (!remoteUrl) return null;
   const repoMatch = remoteUrl.match(/[:/]([^/]+?)(?:\.git)?$/);
   return repoMatch?.[1] ?? null;
-}
-
-function readGitBranchName(cwd: string, gitRunner: GitRunner): string | null {
-  return gitRunner(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
 }
 
 function readGitRemoteUrl(cwd: string, remoteName: string, gitRunner: GitRunner): string | null {
@@ -263,25 +223,24 @@ function readGitRemoteUrl(cwd: string, remoteName: string, gitRunner: GitRunner)
 function readFirstRemoteName(cwd: string, gitRunner: GitRunner): string | null {
   const remotes = gitRunner(cwd, ['remote']);
   if (!remotes) return null;
-
   for (const remote of remotes.split(/\r?\n/)) {
     const trimmed = remote.trim();
     if (trimmed) return trimmed;
   }
-
   return null;
 }
 
 function readRepoBasename(cwd: string, gitRunner: GitRunner): string | null {
   const topLevel = gitRunner(cwd, ['rev-parse', '--show-toplevel']);
-  return topLevel ? basename(topLevel) : null;
+  return topLevel ? topLevel.split(/[\\/]/).pop() ?? null : null;
 }
 
 function resolveRepoLabel(cwd: string, config: ResolvedHudConfig, gitRunner: GitRunner): string | null {
-  if (config.git.repoLabel) return config.git.repoLabel;
+  const vcsConfig = config.vcs ?? config.git;
+  if (vcsConfig.repoLabel) return vcsConfig.repoLabel;
 
-  if (config.git.remoteName) {
-    const repoFromConfiguredRemote = extractRepoName(readGitRemoteUrl(cwd, config.git.remoteName, gitRunner));
+  if (vcsConfig.remoteName) {
+    const repoFromConfiguredRemote = extractRepoName(readGitRemoteUrl(cwd, vcsConfig.remoteName, gitRunner));
     if (repoFromConfiguredRemote) return repoFromConfiguredRemote;
   }
 
@@ -297,10 +256,6 @@ function resolveRepoLabel(cwd: string, config: ResolvedHudConfig, gitRunner: Git
   return readRepoBasename(cwd, gitRunner);
 }
 
-export function readGitBranch(cwd: string): string | null {
-  return readGitBranchName(cwd, runGit);
-}
-
 export function buildGitBranchLabel(
   cwd: string,
   config: ResolvedHudConfig = DEFAULT_HUD_CONFIG,
@@ -309,7 +264,8 @@ export function buildGitBranchLabel(
   const branch = readGitBranchName(cwd, gitRunner);
   if (!branch) return null;
 
-  if (config.git.display === 'branch') {
+  const vcsConfig = config.vcs ?? config.git;
+  if (vcsConfig.display === 'branch') {
     return branch;
   }
 
@@ -320,7 +276,12 @@ export function buildGitBranchLabel(
 /** Read all state files and build the full render context */
 export async function readAllState(cwd: string, config: ResolvedHudConfig = DEFAULT_HUD_CONFIG): Promise<HudRenderContext> {
   const version = readVersion();
-  const gitBranch = buildGitBranchLabel(cwd, config);
+  const vcsRef = getDisplayRef(cwd, {
+    gitStyle: config.vcs?.display ?? config.git.display,
+    remoteName: config.vcs?.remoteName ?? config.git.remoteName,
+    repoLabel: config.vcs?.repoLabel ?? config.git.repoLabel,
+  });
+  const gitBranch = vcsRef;
 
   const [ralph, ultrawork, autopilot, ralplan, deepInterview, autoresearch, ultraqa, team, metrics, hudNotify, session] =
     await Promise.all([
@@ -348,6 +309,7 @@ export async function readAllState(cwd: string, config: ResolvedHudConfig = DEFA
 
   return {
     version,
+    vcsRef,
     gitBranch,
     ralph,
     ultrawork,

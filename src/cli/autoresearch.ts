@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { readFileSync } from 'fs';
 import { ensureWorktree, planWorktreeTarget } from '../team/worktree.js';
 import { loadAutoresearchMissionContract } from '../autoresearch/contracts.js';
@@ -26,6 +26,7 @@ import {
 } from './autoresearch-intake.js';
 import { CODEX_BYPASS_FLAG, MADMAX_FLAG } from './constants.js';
 import { restoreStandaloneHudPane, enableMouseScrolling } from '../team/tmux-session.js';
+import { detectWorkspace } from '../vcs/index.js';
 
 export const AUTORESEARCH_HELP = `omx autoresearch - Launch OMX autoresearch with thin-supervisor parity semantics
 
@@ -43,7 +44,7 @@ Arguments:
   --topic/...      Seed the deep-interview intake with draft values; still requires refinement/confirmation before launch.
   init             Bare init is an interactive deep-interview alias on TTYs; init with flags is the expert scaffold path.
   run              Execute a crystallized autoresearch mission, preferring tmux split-pane launch when available.
-  <mission-dir>    Directory inside a git repository containing mission.md and sandbox.md
+  <mission-dir>    Directory inside a git repository or svn working copy containing mission.md and sandbox.md
   <run-id>         Existing autoresearch run id from .omx/logs/autoresearch/<run-id>/manifest.json
 
 Behavior:
@@ -179,12 +180,11 @@ export interface ParsedAutoresearchArgs {
 }
 
 function resolveRepoRoot(cwd: string): string {
-  return execFileSync('git', ['rev-parse', '--show-toplevel'], {
-    cwd,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    }).trim();
+  const workspace = detectWorkspace(cwd);
+  if (!workspace.root) {
+    throw new Error('autoresearch requires a git repository or svn working copy');
+  }
+  return workspace.root;
 }
 
 export function parseAutoresearchArgs(args: readonly string[]): ParsedAutoresearchArgs {
@@ -361,19 +361,24 @@ async function executeAutoresearchMissionRun(missionDir: string, codexArgs: stri
   const contract = await loadAutoresearchMissionContract(missionDir);
   await assertModeStartAllowed('autoresearch', contract.repoRoot);
   const runTag = buildAutoresearchRunTag();
-  const plan = planWorktreeTarget({
-    cwd: contract.repoRoot,
-    scope: 'autoresearch',
-    mode: { enabled: true, detached: false, name: contract.missionSlug },
-    worktreeTag: runTag,
-  });
-  const ensured = ensureWorktree(plan);
-  if (!ensured.enabled) {
-    throw new Error('autoresearch worktree planning unexpectedly disabled');
-  }
+  const worktreePath = contract.workspaceKind === 'git'
+    ? (() => {
+      const plan = planWorktreeTarget({
+        cwd: contract.repoRoot,
+        scope: 'autoresearch',
+        mode: { enabled: true, detached: false, name: contract.missionSlug },
+        worktreeTag: runTag,
+      });
+      const ensured = ensureWorktree(plan);
+      if (!ensured.enabled) {
+        throw new Error('autoresearch worktree planning unexpectedly disabled');
+      }
+      return ensured.worktreePath;
+    })()
+    : contract.repoRoot;
 
-  const worktreeContract = await materializeAutoresearchMissionToWorktree(contract, ensured.worktreePath);
-  const runtime = await prepareAutoresearchRuntime(worktreeContract, contract.repoRoot, ensured.worktreePath, { runTag });
+  const worktreeContract = await materializeAutoresearchMissionToWorktree(contract, worktreePath);
+  const runtime = await prepareAutoresearchRuntime(worktreeContract, contract.repoRoot, worktreePath, { runTag });
   await runAutoresearchLoop(codexArgs, runtime, worktreeContract.missionDir);
 }
 

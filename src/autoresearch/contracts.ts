@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { basename, join, relative, resolve } from 'path';
+import { detectWorkspace, type WorkspaceKind } from '../vcs/index.js';
 
 export type AutoresearchKeepPolicy = 'score_improvement' | 'pass_only';
 
@@ -25,6 +26,7 @@ export interface AutoresearchEvaluatorResult {
 export interface AutoresearchMissionContract {
   missionDir: string;
   repoRoot: string;
+  workspaceKind?: WorkspaceKind;
   missionFile: string;
   sandboxFile: string;
   missionRelativeDir: string;
@@ -34,7 +36,7 @@ export interface AutoresearchMissionContract {
   missionSlug: string;
 }
 
-const MISSION_DIR_GIT_ERROR = 'mission-dir must be inside a git repository.';
+const MISSION_DIR_GIT_ERROR = 'mission-dir must be inside a git repository or svn working copy.';
 const SANDBOX_FRONTMATTER_ERROR = 'sandbox.md must start with YAML frontmatter containing evaluator.command and evaluator.format=json.';
 const EVALUATOR_BLOCK_ERROR = 'sandbox.md frontmatter must define an evaluator block.';
 const EVALUATOR_COMMAND_ERROR = 'sandbox.md frontmatter evaluator.command is required.';
@@ -215,7 +217,13 @@ export async function loadAutoresearchMissionContract(missionDirArg: string): Pr
     throw contractError(`mission-dir does not exist: ${missionDir}`);
   }
 
-  const repoRoot = readGit(missionDir, ['rev-parse', '--show-toplevel']);
+  const workspace = detectWorkspace(missionDir);
+  const repoRoot = workspace.root ?? (workspace.kind === 'git'
+    ? readGit(missionDir, ['rev-parse', '--show-toplevel'])
+    : '');
+  if (!repoRoot) {
+    throw contractError(MISSION_DIR_GIT_ERROR);
+  }
   ensurePathInside(repoRoot, missionDir);
 
   const missionFile = join(missionDir, 'mission.md');
@@ -236,6 +244,7 @@ export async function loadAutoresearchMissionContract(missionDirArg: string): Pr
   return {
     missionDir,
     repoRoot,
+    workspaceKind: workspace.kind,
     missionFile,
     sandboxFile,
     missionRelativeDir,

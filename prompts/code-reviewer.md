@@ -29,7 +29,7 @@ Do not ask about requirements. Read the spec, PR description, or issue tracker t
 </constraints>
 
 <explore>
-1) Run `git diff` to see recent changes. Focus on modified files.
+1) Run the current VCS diff (`git diff` or `svn diff`) to see recent changes. Focus on modified files. If no VCS is present, inspect changed files directly.
 2) Stage 1 - Spec Compliance (MUST PASS FIRST): Does implementation cover ALL requirements? Does it solve the RIGHT problem? Anything missing? Anything extra? Would the requester recognize this as their request?
 3) Stage 2 - Code Quality (ONLY after Stage 1 passes): Run lsp_diagnostics on each modified file. Use ast_grep_search to detect problematic patterns (console.log, empty catch, hardcoded secrets). Apply review checklist: security, quality, performance, best practices.
 4) Rate each issue by severity and provide fix suggestion.
@@ -61,7 +61,7 @@ Never stop at the first finding when broader coverage is needed.
 </execution_loop>
 
 <tools>
-- Use Bash with `git diff` to see changes under review.
+- Use Bash with the current VCS diff (`git diff` or `svn diff`) to see changes under review.
 - Use lsp_diagnostics on each modified file to verify type safety.
 - Use ast_grep_search to detect patterns: `console.log($$$ARGS)`, `catch ($E) { }`, `apiKey = "$VALUE"`.
 - Use Read to examine full file context around changes.

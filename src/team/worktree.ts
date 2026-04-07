@@ -2,6 +2,7 @@ import { execFile as execFileCb, execFileSync, spawnSync } from 'child_process';
 import { existsSync, mkdirSync } from 'fs';
 import { basename, dirname, join, resolve } from 'path';
 import { promisify } from 'util';
+import { detectWorkspace, type WorkspaceKind } from '../vcs/index.js';
 
 const execFilePromise = promisify(execFileCb);
 
@@ -36,6 +37,7 @@ export interface PlannedWorktreeTarget {
 
 export interface EnsureWorktreeResult {
   enabled: true;
+  workspaceKind?: WorkspaceKind;
   repoRoot: string;
   worktreePath: string;
   detached: boolean;
@@ -55,12 +57,11 @@ interface GitWorktreeEntry {
 const BRANCH_IN_USE_PATTERN = /already checked out|already used by worktree|is already checked out/i;
 
 export function isGitRepository(cwd: string): boolean {
-  const result = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-    cwd,
-    encoding: 'utf-8',
-      windowsHide: true,
-    });
-  return result.status === 0;
+  return detectWorkspace(cwd).kind === 'git';
+}
+
+export function detectWorkspaceKind(cwd: string): WorkspaceKind {
+  return detectWorkspace(cwd).kind;
 }
 
 function sanitizePathToken(value: string): string {
@@ -334,6 +335,7 @@ export function parseWorktreeMode(args: string[]): ParsedWorktreeMode {
 
 export function planWorktreeTarget(input: WorktreePlanInput): PlannedWorktreeTarget | { enabled: false } {
   if (!input.mode.enabled) return { enabled: false };
+  if (detectWorkspace(input.cwd).kind !== 'git') return { enabled: false };
 
   const repoRoot = readGit(input.cwd, ['rev-parse', '--show-toplevel']);
   const baseRef = readGit(repoRoot, ['rev-parse', 'HEAD']);
@@ -377,6 +379,7 @@ export function ensureWorktree(plan: PlannedWorktreeTarget | { enabled: false })
 
     return {
       enabled: true,
+      workspaceKind: 'git',
       repoRoot: plan.repoRoot,
       worktreePath: resolve(plan.worktreePath),
       detached: plan.detached,
@@ -423,6 +426,7 @@ export function ensureWorktree(plan: PlannedWorktreeTarget | { enabled: false })
 
   return {
     enabled: true,
+    workspaceKind: 'git',
     repoRoot: plan.repoRoot,
     worktreePath: resolve(plan.worktreePath),
     detached: plan.detached,

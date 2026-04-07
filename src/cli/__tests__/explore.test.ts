@@ -526,10 +526,19 @@ describe('resolveExploreSparkShellRoute', () => {
       argv: ['git', 'diff', '--stat'],
       reason: 'long-output',
     });
+    assert.deepEqual(resolveExploreSparkShellRoute('svn status'), {
+      argv: ['svn', 'status'],
+      reason: 'long-output',
+    });
+    assert.deepEqual(resolveExploreSparkShellRoute('run svn info'), {
+      argv: ['svn', 'info'],
+      reason: 'shell-native',
+    });
   });
 
   it('rejects non-read-only or shell-unsafe commands for sparkshell routing', () => {
     assert.equal(resolveExploreSparkShellRoute('git commit -m test'), undefined);
+    assert.equal(resolveExploreSparkShellRoute('svn commit -m test'), undefined);
     assert.equal(resolveExploreSparkShellRoute('npm test'), undefined);
     assert.equal(resolveExploreSparkShellRoute('git log | head'), undefined);
     assert.equal(resolveExploreSparkShellRoute('find /tmp -maxdepth 1'), undefined);

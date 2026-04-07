@@ -174,7 +174,7 @@ Options:
   --custom <name>
                 Select custom/OpenClaw gateway name for temporary notification mode
   -w, --worktree[=<name>]
-                Launch Codex in a git worktree (detached when no name is given)
+                Launch Codex in a git worktree (detached when no name is given, ignored outside git)
   --force       Force reinstall (overwrite existing files)
   --dry-run     Show what would be done without doing it
   --keep-config Skip config.toml cleanup during uninstall

@@ -30,6 +30,7 @@ const MANUAL_END = "<!-- OMX:AGENTS-INIT:MANUAL:END -->";
 const DEFAULT_LIST_LIMIT = 12;
 const IGNORE_DIRECTORY_NAMES = new Set([
   ".git",
+  ".svn",
   ".omx",
   ".codex",
   "node_modules",

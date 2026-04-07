@@ -84,6 +84,8 @@ export interface SessionStateForHud {
 /** All data needed to render one HUD frame */
 export interface HudRenderContext {
   version: string | null;
+  vcsRef?: string | null;
+  /** @deprecated use vcsRef */
   gitBranch: string | null;
   ralph: RalphStateForHud | null;
   ultrawork: UltraworkStateForHud | null;
@@ -104,6 +106,7 @@ export interface HudRenderContext {
 export type HudPreset = 'minimal' | 'focused' | 'full';
 
 export type HudGitDisplay = 'branch' | 'repo-branch';
+export type HudVcsDisplay = 'branch' | 'repo-branch';
 
 export interface HudGitConfig {
   display?: HudGitDisplay;
@@ -111,9 +114,16 @@ export interface HudGitConfig {
   repoLabel?: string;
 }
 
+export interface HudVcsConfig {
+  display?: HudVcsDisplay;
+  remoteName?: string;
+  repoLabel?: string;
+}
+
 /** HUD configuration stored in .omx/hud-config.json */
 export interface HudConfig {
   preset?: HudPreset;
+  vcs?: HudVcsConfig;
   git?: HudGitConfig;
 }
 
@@ -123,14 +133,24 @@ export interface ResolvedHudGitConfig {
   repoLabel?: string;
 }
 
+export interface ResolvedHudVcsConfig {
+  display: HudVcsDisplay;
+  remoteName?: string;
+  repoLabel?: string;
+}
+
 export interface ResolvedHudConfig {
   preset: HudPreset;
+  vcs?: ResolvedHudVcsConfig;
   git: ResolvedHudGitConfig;
 }
 
 /** Default HUD configuration */
 export const DEFAULT_HUD_CONFIG: ResolvedHudConfig = {
   preset: 'focused',
+  vcs: {
+    display: 'repo-branch',
+  },
   git: {
     display: 'repo-branch',
   },

@@ -63,6 +63,7 @@ import {
   type TeamEventType,
 } from './contracts.js';
 import type { WorktreeMode } from './worktree.js';
+import type { WorkspaceKind } from '../vcs/index.js';
 
 export interface TeamConfig {
   name: string;
@@ -78,7 +79,8 @@ export interface TeamConfig {
   next_task_id: number;
   leader_cwd?: string;
   team_state_root?: string;
-  workspace_mode?: 'single' | 'worktree';
+  workspace_mode?: 'single' | 'worktree' | 'shared';
+  workspace_vcs_kind?: WorkspaceKind;
   worktree_mode?: WorktreeMode;
   /** Leader's own tmux pane ID — must never be killed during worker cleanup. */
   leader_pane_id: string | null;
@@ -238,7 +240,8 @@ export interface TeamManifestV2 {
   created_at: string;
   leader_cwd?: string;
   team_state_root?: string;
-  workspace_mode?: 'single' | 'worktree';
+  workspace_mode?: 'single' | 'worktree' | 'shared';
+  workspace_vcs_kind?: WorkspaceKind;
   worktree_mode?: WorktreeMode;
   leader_pane_id: string | null;
   hud_pane_id: string | null;
@@ -251,7 +254,8 @@ export interface TeamManifestV2 {
 export interface TeamWorkspaceMetadata {
   leader_cwd?: string;
   team_state_root?: string;
-  workspace_mode?: 'single' | 'worktree';
+  workspace_mode?: 'single' | 'worktree' | 'shared';
+  workspace_vcs_kind?: WorkspaceKind;
   worktree_mode?: WorktreeMode;
 }
 
@@ -595,6 +599,12 @@ function mailboxLockDir(teamName: string, workerName: string, cwd: string): stri
   return p;
 }
 
+function workspaceLockPath(teamName: string, cwd: string): string {
+  const p = join(teamDir(teamName, cwd), 'workspace.lock');
+  assertPathWithinDir(p, resolveTeamStateRoot(cwd));
+  return p;
+}
+
 function dispatchRequestsPath(teamName: string, cwd: string): string {
   return join(teamDir(teamName, cwd), 'dispatch', 'requests.json');
 }
@@ -770,6 +780,7 @@ export async function initTeamState(
     leader_cwd: workspace.leader_cwd,
     team_state_root: workspace.team_state_root,
     workspace_mode: workspace.workspace_mode,
+    workspace_vcs_kind: workspace.workspace_vcs_kind,
     worktree_mode: workspace.worktree_mode,
     leader_pane_id: null,
     hud_pane_id: null,
@@ -812,6 +823,7 @@ export async function initTeamState(
       leader_cwd: workspace.leader_cwd,
       team_state_root: workspace.team_state_root,
       workspace_mode: workspace.workspace_mode,
+      workspace_vcs_kind: workspace.workspace_vcs_kind,
       worktree_mode: workspace.worktree_mode,
       leader_pane_id: null,
       hud_pane_id: null,
@@ -843,6 +855,7 @@ async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
       leader_cwd: normalized.leader_cwd,
       team_state_root: normalized.team_state_root,
       workspace_mode: normalized.workspace_mode,
+      workspace_vcs_kind: normalized.workspace_vcs_kind,
       worktree_mode: normalized.worktree_mode,
       leader_pane_id: normalized.leader_pane_id,
       hud_pane_id: normalized.hud_pane_id,
@@ -875,6 +888,7 @@ function teamConfigFromManifest(manifest: TeamManifestV2): TeamConfig {
     leader_cwd: manifest.leader_cwd,
     team_state_root: manifest.team_state_root,
     workspace_mode: manifest.workspace_mode,
+    workspace_vcs_kind: manifest.workspace_vcs_kind,
     worktree_mode: manifest.worktree_mode,
     leader_pane_id: manifest.leader_pane_id,
     hud_pane_id: manifest.hud_pane_id,
@@ -925,6 +939,7 @@ function teamManifestFromConfig(config: TeamConfig): TeamManifestV2 {
     leader_cwd: normalized.leader_cwd,
     team_state_root: normalized.team_state_root,
     workspace_mode: normalized.workspace_mode,
+    workspace_vcs_kind: normalized.workspace_vcs_kind,
     worktree_mode: normalized.worktree_mode,
     leader_pane_id: normalized.leader_pane_id,
     hud_pane_id: normalized.hud_pane_id,
@@ -1286,6 +1301,8 @@ export async function claimTask(
     normalizeTask,
     isTerminalTaskStatus,
     taskFilePath,
+    workspaceLockPath,
+    listTasks,
     writeAtomic,
   });
 }
@@ -1309,6 +1326,8 @@ export async function transitionTaskStatus(
     isTerminalTaskStatus,
     canTransitionTaskStatus,
     taskFilePath,
+    workspaceLockPath,
+    listTasks,
     writeAtomic,
     appendTeamEvent,
     readMonitorSnapshot,
@@ -1332,6 +1351,8 @@ export async function releaseTaskClaim(
     normalizeTask,
     isTerminalTaskStatus,
     taskFilePath,
+    workspaceLockPath,
+    listTasks,
     writeAtomic,
   });
 }
@@ -1350,6 +1371,8 @@ export async function reclaimExpiredTaskClaim(
     normalizeTask,
     isTerminalTaskStatus,
     taskFilePath,
+    workspaceLockPath,
+    listTasks,
     writeAtomic,
   });
 }

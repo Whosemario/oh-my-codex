@@ -1,6 +1,7 @@
 import type { TeamPhase, TerminalPhase } from '../orchestrator.js';
 import type { TeamTaskStatus, TeamEventType } from '../contracts.js';
 import type { WorktreeMode } from '../worktree.js';
+import type { WorkspaceKind } from '../../vcs/index.js';
 
 export interface TeamConfig {
   name: string;
@@ -16,7 +17,8 @@ export interface TeamConfig {
   next_task_id: number;
   leader_cwd?: string;
   team_state_root?: string;
-  workspace_mode?: 'single' | 'worktree';
+  workspace_mode?: 'single' | 'worktree' | 'shared';
+  workspace_vcs_kind?: WorkspaceKind;
   worktree_mode?: WorktreeMode;
   leader_pane_id: string | null;
   hud_pane_id: string | null;
@@ -171,7 +173,8 @@ export interface TeamManifestV2 {
   created_at: string;
   leader_cwd?: string;
   team_state_root?: string;
-  workspace_mode?: 'single' | 'worktree';
+  workspace_mode?: 'single' | 'worktree' | 'shared';
+  workspace_vcs_kind?: WorkspaceKind;
   worktree_mode?: WorktreeMode;
   leader_pane_id: string | null;
   hud_pane_id: string | null;
@@ -183,7 +186,8 @@ export interface TeamManifestV2 {
 export interface TeamWorkspaceMetadata {
   leader_cwd?: string;
   team_state_root?: string;
-  workspace_mode?: 'single' | 'worktree';
+  workspace_mode?: 'single' | 'worktree' | 'shared';
+  workspace_vcs_kind?: WorkspaceKind;
   worktree_mode?: WorktreeMode;
 }
 

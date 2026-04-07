@@ -1,13 +1,14 @@
 import { execFileSync, spawnSync } from 'child_process';
 import { existsSync } from 'fs';
-import { mkdir, readFile, symlink, writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { cp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'fs/promises';
+import { basename, dirname, join, relative } from 'path';
 import { cancelMode, readModeState, startMode, updateModeState } from '../modes/base.js';
 import {
   parseEvaluatorResult,
   type AutoresearchKeepPolicy,
   type AutoresearchMissionContract,
 } from './contracts.js';
+import { detectWorkspace, getStatus } from '../vcs/index.js';
 
 export type AutoresearchCandidateStatus = 'candidate' | 'noop' | 'abort' | 'interrupted';
 export type AutoresearchDecisionStatus = 'baseline' | 'keep' | 'discard' | 'ambiguous' | 'noop' | 'abort' | 'interrupted' | 'error';
@@ -45,6 +46,8 @@ export interface AutoresearchCandidateArtifact {
   status: AutoresearchCandidateStatus;
   candidate_commit: string | null;
   base_commit: string;
+  candidate_checkpoint_id?: string | null;
+  base_checkpoint_id?: string;
   description: string;
   notes: string[];
   created_at: string;
@@ -59,6 +62,9 @@ export interface AutoresearchLedgerEntry {
   base_commit: string;
   candidate_commit: string | null;
   kept_commit: string;
+  base_checkpoint_id?: string;
+  candidate_checkpoint_id?: string | null;
+  kept_checkpoint_id?: string;
   keep_policy: AutoresearchKeepPolicy;
   evaluator: AutoresearchEvaluationRecord | null;
   created_at: string;
@@ -67,7 +73,7 @@ export interface AutoresearchLedgerEntry {
 }
 
 export interface AutoresearchRunManifest {
-  schema_version: 1;
+  schema_version: 1 | 2;
   run_id: string;
   run_tag: string;
   mission_dir: string;
@@ -75,12 +81,17 @@ export interface AutoresearchRunManifest {
   sandbox_file: string;
   repo_root: string;
   worktree_path: string;
+  workspace_kind?: 'git' | 'svn';
   mission_slug: string;
   branch_name: string;
   baseline_commit: string;
   last_kept_commit: string;
   last_kept_score: number | null;
   latest_candidate_commit: string | null;
+  baseline_checkpoint_id?: string;
+  last_kept_checkpoint_id?: string;
+  latest_candidate_checkpoint_id?: string | null;
+  snapshots_dir?: string;
   results_file: string;
   instructions_file: string;
   manifest_file: string;
@@ -123,6 +134,8 @@ interface AutoresearchInstructionLedgerSummary {
   reason: string;
   kept_commit: string;
   candidate_commit: string | null;
+  kept_checkpoint_id?: string;
+  candidate_checkpoint_id?: string | null;
   evaluator_status: AutoresearchEvaluationRecord['status'] | null;
   evaluator_score: number | null;
   description: string;
@@ -175,6 +188,11 @@ function readGit(repoPath: string, args: string[]): string {
   }
 }
 
+function readWorkspaceKind(worktreePath: string): 'git' | 'svn' {
+  const workspace = detectWorkspace(worktreePath);
+  return workspace.kind === 'svn' ? 'svn' : 'git';
+}
+
 function tryResolveGitCommit(worktreePath: string, ref: string): string | null {
   const result = spawnSync('git', ['rev-parse', '--verify', `${ref}^{commit}`], {
     cwd: worktreePath,
@@ -198,6 +216,7 @@ async function writeGitInfoExclude(worktreePath: string, pattern: string): Promi
 }
 
 async function ensureRuntimeExcludes(worktreePath: string): Promise<void> {
+  if (readWorkspaceKind(worktreePath) !== 'git') return;
   for (const file of AUTORESEARCH_WORKTREE_EXCLUDES) {
     await writeGitInfoExclude(worktreePath, file);
   }
@@ -220,6 +239,90 @@ function readGitFullHead(worktreePath: string): string {
   return readGit(worktreePath, ['rev-parse', 'HEAD']);
 }
 
+function readSvnRevision(worktreePath: string): string {
+  const result = spawnSync('svn', ['info', '--show-item', 'revision'], {
+    cwd: worktreePath,
+    encoding: 'utf-8',
+    windowsHide: true,
+  });
+  if (result.status === 0) {
+    const revision = (result.stdout || '').trim();
+    if (revision) return revision;
+  }
+  return 'svn-working-copy';
+}
+
+function readCurrentWorkspaceMarker(worktreePath: string): string {
+  return readWorkspaceKind(worktreePath) === 'svn'
+    ? `${basename(worktreePath)}@${readSvnRevision(worktreePath)}`
+    : readGitShortHead(worktreePath);
+}
+
+function readCurrentWorkspaceIdentity(worktreePath: string): string {
+  return readWorkspaceKind(worktreePath) === 'svn'
+    ? `${basename(worktreePath)}@${readSvnRevision(worktreePath)}`
+    : readGitFullHead(worktreePath);
+}
+
+function snapshotPath(snapshotsDir: string, checkpointId: string): string {
+  return join(snapshotsDir, checkpointId);
+}
+
+function buildCheckpointId(prefix = 'cp'): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function shouldSkipSnapshotPath(relPath: string): boolean {
+  if (!relPath || relPath === '.') return false;
+  return AUTORESEARCH_WORKTREE_EXCLUDES.some((entry) => entry.endsWith('/')
+    ? relPath === entry.slice(0, -1) || relPath.startsWith(entry)
+    : relPath === entry);
+}
+
+async function captureWorkspaceSnapshot(worktreePath: string, snapshotsDir: string, checkpointId: string): Promise<string> {
+  const destination = snapshotPath(snapshotsDir, checkpointId);
+  await rm(destination, { recursive: true, force: true });
+  await mkdir(destination, { recursive: true });
+  const entries = await readdir(worktreePath, { withFileTypes: true });
+  for (const entry of entries) {
+    const relPath = entry.name;
+    if (relPath === '.git' || relPath === '.svn' || shouldSkipSnapshotPath(relPath)) continue;
+    await cp(join(worktreePath, entry.name), join(destination, entry.name), {
+      recursive: true,
+      filter: (src) => {
+        const nestedRelPath = relative(worktreePath, src);
+        if (nestedRelPath === '.git' || nestedRelPath.startsWith('.git/') || nestedRelPath === '.svn' || nestedRelPath.startsWith('.svn/')) {
+          return false;
+        }
+        return !shouldSkipSnapshotPath(nestedRelPath);
+      },
+    });
+  }
+  return destination;
+}
+
+async function clearWorkspaceForRestore(worktreePath: string): Promise<void> {
+  const entries = await readdir(worktreePath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === '.git' || entry.name === '.svn' || entry.name === '.omx' || entry.name === 'node_modules') {
+      continue;
+    }
+    await rm(join(worktreePath, entry.name), { recursive: true, force: true });
+  }
+}
+
+async function restoreWorkspaceSnapshot(worktreePath: string, snapshotsDir: string, checkpointId: string): Promise<void> {
+  const source = snapshotPath(snapshotsDir, checkpointId);
+  if (!existsSync(source)) {
+    throw new Error(`autoresearch_snapshot_missing:${checkpointId}`);
+  }
+  await clearWorkspaceForRestore(worktreePath);
+  const entries = await readdir(source, { withFileTypes: true });
+  for (const entry of entries) {
+    await cp(join(source, entry.name), join(worktreePath, entry.name), { recursive: true });
+  }
+}
+
 function requireGitSuccess(worktreePath: string, args: string[]): void {
   const result = spawnSync('git', args, {
     cwd: worktreePath,
@@ -231,11 +334,14 @@ function requireGitSuccess(worktreePath: string, args: string[]): void {
 }
 
 function gitStatusLines(worktreePath: string): string[] {
+  if (readWorkspaceKind(worktreePath) === 'svn') {
+    return getStatus(worktreePath);
+  }
   const result = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], {
     cwd: worktreePath,
     encoding: 'utf-8',
-      windowsHide: true,
-    });
+    windowsHide: true,
+  });
   if (result.status !== 0) {
     throw new Error((result.stderr || '').trim() || `git status failed for ${worktreePath}`);
   }
@@ -247,9 +353,13 @@ function gitStatusLines(worktreePath: string): string[] {
 
 function isAllowedRuntimeDirtyLine(line: string): boolean {
   const trimmed = line.trim();
-  if (trimmed.length < 4) return false;
-  const path = trimmed.slice(3).trim();
-  return trimmed.startsWith('?? ') && AUTORESEARCH_WORKTREE_EXCLUDES.some((exclude) => exclude.endsWith('/')
+  if (trimmed.length < 2) return false;
+  const path = trimmed.startsWith('?? ')
+    ? trimmed.slice(3).trim()
+    : trimmed.startsWith('?')
+      ? trimmed.slice(1).trim()
+      : '';
+  return path.length > 0 && (trimmed.startsWith('?? ') || trimmed.startsWith('?')) && AUTORESEARCH_WORKTREE_EXCLUDES.some((exclude) => exclude.endsWith('/')
     ? path.startsWith(exclude) || path === exclude.slice(0, -1)
     : path === exclude);
 }
@@ -367,9 +477,12 @@ async function recordAutoresearchIteration(
     evaluator?: AutoresearchEvaluationRecord | null;
     notes: string[];
     createdAt?: string;
+    baseCheckpointId?: string;
+    candidateCheckpointId?: string | null;
+    keptCheckpointId?: string;
   },
 ): Promise<void> {
-  const commit = readGitShortHead(manifest.worktree_path);
+  const commit = readCurrentWorkspaceMarker(manifest.worktree_path);
   await appendAutoresearchResultsRow(manifest.results_file, {
     iteration: manifest.iteration,
     commit,
@@ -387,6 +500,9 @@ async function recordAutoresearchIteration(
     base_commit: entry.baseCommit,
     candidate_commit: entry.candidateCommit,
     kept_commit: entry.keptCommit ?? manifest.last_kept_commit,
+    base_checkpoint_id: entry.baseCheckpointId ?? entry.baseCommit,
+    candidate_checkpoint_id: entry.candidateCheckpointId ?? entry.candidateCommit,
+    kept_checkpoint_id: entry.keptCheckpointId ?? manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
     keep_policy: manifest.keep_policy,
     evaluator: entry.evaluator ?? null,
     created_at: entry.createdAt ?? nowIso(),
@@ -445,6 +561,8 @@ function formatAutoresearchInstructionSummary(
       reason: trimContent(entry.decision_reason, 160),
       kept_commit: entry.kept_commit,
       candidate_commit: entry.candidate_commit,
+      kept_checkpoint_id: entry.kept_checkpoint_id,
+      candidate_checkpoint_id: entry.candidate_checkpoint_id,
       evaluator_status: entry.evaluator?.status ?? null,
       evaluator_score: typeof entry.evaluator?.score === 'number' ? entry.evaluator.score : null,
       description: trimContent(entry.description, 120),
@@ -528,9 +646,11 @@ export async function runAutoresearchEvaluator(
       decision: record.status === 'error' ? 'error' : record.status === 'pass' ? 'keep' : 'discard',
       decision_reason: 'raw evaluator record',
       candidate_status: 'candidate',
-      base_commit: readGitShortHead(worktreePath),
+      base_commit: readCurrentWorkspaceMarker(worktreePath),
       candidate_commit: null,
-      kept_commit: readGitShortHead(worktreePath),
+      kept_commit: readCurrentWorkspaceMarker(worktreePath),
+      base_checkpoint_id: readCurrentWorkspaceMarker(worktreePath),
+      kept_checkpoint_id: readCurrentWorkspaceIdentity(worktreePath),
       keep_policy: contract.sandbox.evaluator.keep_policy ?? 'score_improvement',
       evaluator: record,
       created_at: nowIso(),
@@ -638,6 +758,8 @@ export function buildAutoresearchInstructions(
     iteration: number;
     baselineCommit: string;
     lastKeptCommit: string;
+    baselineCheckpointId?: string;
+    lastKeptCheckpointId?: string;
     lastKeptScore?: number | null;
     resultsFile: string;
     candidateFile: string;
@@ -655,8 +777,11 @@ export function buildAutoresearchInstructions(
     `Sandbox file: ${contract.sandboxFile}`,
     `Mission slug: ${contract.missionSlug}`,
     `Iteration: ${context.iteration}`,
+    `Workspace kind: ${contract.workspaceKind ?? 'git'}`,
     `Baseline commit: ${context.baselineCommit}`,
     `Last kept commit: ${context.lastKeptCommit}`,
+    `Baseline checkpoint: ${context.baselineCheckpointId ?? context.baselineCommit}`,
+    `Last kept checkpoint: ${context.lastKeptCheckpointId ?? context.lastKeptCommit}`,
     `Last kept score: ${typeof context.lastKeptScore === 'number' ? context.lastKeptScore : 'n/a'}`,
     `Results file: ${context.resultsFile}`,
     `Candidate artifact: ${context.candidateFile}`,
@@ -668,6 +793,8 @@ export function buildAutoresearchInstructions(
       iteration: context.iteration,
       baseline_commit: context.baselineCommit,
       last_kept_commit: context.lastKeptCommit,
+      baseline_checkpoint_id: context.baselineCheckpointId ?? context.baselineCommit,
+      last_kept_checkpoint_id: context.lastKeptCheckpointId ?? context.lastKeptCommit,
       last_kept_score: context.lastKeptScore ?? null,
       previous_iteration_outcome: context.previousIterationOutcome ?? 'none yet',
       recent_ledger_summary: context.recentLedgerSummary ?? [],
@@ -676,15 +803,17 @@ export function buildAutoresearchInstructions(
     '```',
     '',
     'Operate as a thin autoresearch experiment worker for exactly one experiment cycle.',
-    'Do not loop forever inside this session. Make at most one candidate commit, then write the candidate artifact JSON and exit.',
+    'Do not loop forever inside this session. Make at most one candidate change, then write the candidate artifact JSON and exit.',
     '',
     'Candidate artifact contract:',
     '- Write JSON to the exact candidate artifact path above.',
     '- status: candidate | noop | abort | interrupted',
     '- candidate_commit: string | null',
     '- base_commit: current base commit before your edits',
-    '- for status=candidate, candidate_commit must resolve in git and match the worktree HEAD commit when you exit',
-    '- base_commit must still match the last kept commit provided above',
+    '- candidate_checkpoint_id: string | null (required for git-compatible flows; optional for svn, supervisor may mint it)',
+    '- base_checkpoint_id: current kept checkpoint before your edits',
+    '- for git status=candidate, candidate_commit must resolve and match the worktree HEAD when you exit',
+    '- base_commit/base_checkpoint_id must still match the last kept baseline provided above',
     '- description: short one-line summary',
     '- notes: array of short strings',
     '- created_at: ISO timestamp',
@@ -727,17 +856,19 @@ export async function materializeAutoresearchMissionToWorktree(
 
   // Commit materialized mission files so the worktree is clean for
   // assertResetSafeWorktree, which runs immediately after this step.
-  try {
-    execFileSync('git', ['add', '--', missionFile, sandboxFile], { cwd: worktreePath, stdio: 'ignore',
-      windowsHide: true,
-    });
-    execFileSync('git', ['commit', '-m', `autoresearch: materialize mission ${contract.missionSlug}`], {
-      cwd: worktreePath,
-      stdio: 'ignore',
-    });
-  } catch {
-    // Non-fatal: if commit fails the reset-safe check will catch it with
-    // a clear diagnostic.
+  if (contract.workspaceKind === 'git') {
+    try {
+      execFileSync('git', ['add', '--', missionFile, sandboxFile], { cwd: worktreePath, stdio: 'ignore',
+        windowsHide: true,
+      });
+      execFileSync('git', ['commit', '-m', `autoresearch: materialize mission ${contract.missionSlug}`], {
+        cwd: worktreePath,
+        stdio: 'ignore',
+      });
+    } catch {
+      // Non-fatal: if commit fails the reset-safe check will catch it with
+      // a clear diagnostic.
+    }
   }
 
   return {
@@ -770,6 +901,8 @@ async function writeInstructionsFile(contract: AutoresearchMissionContract, mani
       iteration: manifest.iteration + 1,
       baselineCommit: manifest.baseline_commit,
       lastKeptCommit: manifest.last_kept_commit,
+      baselineCheckpointId: manifest.baseline_checkpoint_id ?? manifest.baseline_commit,
+      lastKeptCheckpointId: manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
       lastKeptScore: manifest.last_kept_score,
       resultsFile: manifest.results_file,
       candidateFile: manifest.candidate_file,
@@ -789,7 +922,7 @@ async function seedBaseline(
   await writeJsonFile(manifest.latest_evaluator_file, evaluation);
   await appendAutoresearchResultsRow(manifest.results_file, {
     iteration: 0,
-    commit: readGitShortHead(manifest.worktree_path),
+    commit: readCurrentWorkspaceMarker(manifest.worktree_path),
     pass: evaluation.pass,
     score: evaluation.score,
     status: evaluation.status === 'error' ? 'error' : 'baseline',
@@ -804,6 +937,8 @@ async function seedBaseline(
     base_commit: manifest.baseline_commit,
     candidate_commit: null,
     kept_commit: manifest.last_kept_commit,
+    base_checkpoint_id: manifest.baseline_checkpoint_id ?? manifest.baseline_commit,
+    kept_checkpoint_id: manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
     keep_policy: manifest.keep_policy,
     evaluator: evaluation,
     created_at: nowIso(),
@@ -829,9 +964,14 @@ export async function prepareAutoresearchRuntime(
 
   const runTag = options.runTag || buildAutoresearchRunTag();
   const runId = buildRunId(contract.missionSlug, runTag);
-  const baselineCommit = readGitShortHead(worktreePath);
-  const branchName = readGit(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   const runDir = join(projectRoot, '.omx', 'logs', 'autoresearch', runId);
+  const snapshotsDir = join(runDir, 'snapshots');
+  const workspaceKind = contract.workspaceKind === 'svn' ? 'svn' : 'git';
+  const baselineCommit = readCurrentWorkspaceMarker(worktreePath);
+  const branchName = workspaceKind === 'git'
+    ? readGit(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+    : `${basename(worktreePath)}@${readSvnRevision(worktreePath)}`;
+  const baselineCheckpointId = workspaceKind === 'git' ? baselineCommit : buildCheckpointId('baseline');
   const stateFile = activeRunStateFile(projectRoot);
   const instructionsFile = join(runDir, 'bootstrap-instructions.md');
   const manifestFile = join(runDir, 'manifest.json');
@@ -843,18 +983,24 @@ export async function prepareAutoresearchRuntime(
   const keepPolicy = contract.sandbox.evaluator.keep_policy ?? 'score_improvement';
 
   await mkdir(runDir, { recursive: true });
+  if (workspaceKind === 'svn') {
+    await mkdir(snapshotsDir, { recursive: true });
+    await captureWorkspaceSnapshot(worktreePath, snapshotsDir, baselineCheckpointId);
+  }
   await initializeAutoresearchResultsFile(resultsFile);
   await writeJsonFile(candidateFile, {
     status: 'noop',
     candidate_commit: null,
     base_commit: baselineCommit,
+    candidate_checkpoint_id: null,
+    base_checkpoint_id: baselineCheckpointId,
     description: 'not-yet-written',
     notes: ['candidate artifact will be overwritten by the launched session'],
     created_at: nowIso(),
   } satisfies AutoresearchCandidateArtifact);
 
   const manifest: AutoresearchRunManifest = {
-    schema_version: 1,
+    schema_version: 2,
     run_id: runId,
     run_tag: runTag,
     mission_dir: contract.missionDir,
@@ -862,12 +1008,17 @@ export async function prepareAutoresearchRuntime(
     sandbox_file: contract.sandboxFile,
     repo_root: projectRoot,
     worktree_path: worktreePath,
+    workspace_kind: workspaceKind,
     mission_slug: contract.missionSlug,
     branch_name: branchName,
     baseline_commit: baselineCommit,
-    last_kept_commit: readGitFullHead(worktreePath),
+    last_kept_commit: readCurrentWorkspaceIdentity(worktreePath),
     last_kept_score: null,
     latest_candidate_commit: null,
+    baseline_checkpoint_id: baselineCheckpointId,
+    last_kept_checkpoint_id: workspaceKind === 'git' ? readCurrentWorkspaceIdentity(worktreePath) : baselineCheckpointId,
+    latest_candidate_checkpoint_id: null,
+    snapshots_dir: workspaceKind === 'svn' ? snapshotsDir : undefined,
     results_file: resultsFile,
     instructions_file: instructionsFile,
     manifest_file: manifestFile,
@@ -917,6 +1068,8 @@ export async function prepareAutoresearchRuntime(
     worktree_path: worktreePath,
     baseline_commit: baselineCommit,
     last_kept_commit: manifest.last_kept_commit,
+    baseline_checkpoint_id: baselineCheckpointId,
+    last_kept_checkpoint_id: manifest.last_kept_checkpoint_id,
     results_file: resultsFile,
     manifest_path: manifestFile,
     iteration_ledger_path: ledgerFile,
@@ -935,6 +1088,7 @@ export async function prepareAutoresearchRuntime(
     latest_evaluator_score: evaluation.score,
     latest_evaluator_ran_at: evaluation.ran_at,
     last_kept_commit: manifest.last_kept_commit,
+    last_kept_checkpoint_id: manifest.last_kept_checkpoint_id,
     last_kept_score: manifest.last_kept_score,
   }, projectRoot);
 
@@ -981,6 +1135,8 @@ export async function resumeAutoresearchRuntime(projectRoot: string, runId: stri
     worktree_path: manifest.worktree_path,
     baseline_commit: manifest.baseline_commit,
     last_kept_commit: manifest.last_kept_commit,
+    baseline_checkpoint_id: manifest.baseline_checkpoint_id ?? manifest.baseline_commit,
+    last_kept_checkpoint_id: manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
     last_kept_score: manifest.last_kept_score,
     results_file: manifest.results_file,
     manifest_path: manifest.manifest_file,
@@ -1029,6 +1185,12 @@ export function parseAutoresearchCandidateArtifact(raw: string): AutoresearchCan
   if (typeof record.base_commit !== 'string' || !record.base_commit.trim()) {
     throw new Error('autoresearch candidate artifact base_commit is required');
   }
+  if (record.candidate_checkpoint_id !== undefined && record.candidate_checkpoint_id !== null && typeof record.candidate_checkpoint_id !== 'string') {
+    throw new Error('autoresearch candidate artifact candidate_checkpoint_id must be string|null when provided');
+  }
+  if (record.base_checkpoint_id !== undefined && typeof record.base_checkpoint_id !== 'string') {
+    throw new Error('autoresearch candidate artifact base_checkpoint_id must be string when provided');
+  }
   if (typeof record.description !== 'string') {
     throw new Error('autoresearch candidate artifact description is required');
   }
@@ -1042,6 +1204,8 @@ export function parseAutoresearchCandidateArtifact(raw: string): AutoresearchCan
     status,
     candidate_commit: record.candidate_commit,
     base_commit: record.base_commit,
+    candidate_checkpoint_id: typeof record.candidate_checkpoint_id === 'string' ? record.candidate_checkpoint_id : null,
+    base_checkpoint_id: typeof record.base_checkpoint_id === 'string' ? record.base_checkpoint_id : record.base_commit,
     description: record.description,
     notes: record.notes,
     created_at: record.created_at,
@@ -1073,15 +1237,39 @@ async function finalizeRun(
   await deactivateAutoresearchRun(manifest);
 }
 
-function resetToLastKeptCommit(manifest: AutoresearchRunManifest): void {
+async function resetToLastKeptState(manifest: AutoresearchRunManifest): Promise<void> {
   assertResetSafeWorktree(manifest.worktree_path);
+  if (manifest.workspace_kind === 'svn') {
+    const checkpointId = manifest.last_kept_checkpoint_id;
+    if (!checkpointId || !manifest.snapshots_dir) {
+      throw new Error('autoresearch missing svn checkpoint metadata');
+    }
+    await restoreWorkspaceSnapshot(manifest.worktree_path, manifest.snapshots_dir, checkpointId);
+    return;
+  }
   requireGitSuccess(manifest.worktree_path, ['reset', '--hard', manifest.last_kept_commit]);
 }
 
 function validateAutoresearchCandidate(
-  manifest: Pick<AutoresearchRunManifest, 'last_kept_commit' | 'worktree_path'>,
+  manifest: Pick<AutoresearchRunManifest, 'last_kept_commit' | 'last_kept_checkpoint_id' | 'worktree_path' | 'workspace_kind'>,
   candidate: AutoresearchCandidateArtifact,
 ): { candidate: AutoresearchCandidateArtifact } | { reason: string } {
+  if (manifest.workspace_kind === 'svn') {
+    const expectedCheckpoint = manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit;
+    const candidateBaseCheckpoint = candidate.base_checkpoint_id ?? candidate.base_commit;
+    if (candidateBaseCheckpoint !== expectedCheckpoint) {
+      return {
+        reason: `candidate base_checkpoint_id ${candidateBaseCheckpoint} does not match last kept checkpoint ${expectedCheckpoint}`,
+      };
+    }
+    return {
+      candidate: {
+        ...candidate,
+        base_checkpoint_id: candidateBaseCheckpoint,
+      },
+    };
+  }
+
   const resolvedBaseCommit = tryResolveGitCommit(manifest.worktree_path, candidate.base_commit);
   if (!resolvedBaseCommit) {
     return {
@@ -1099,6 +1287,7 @@ function validateAutoresearchCandidate(
       candidate: {
         ...candidate,
         base_commit: resolvedBaseCommit,
+        base_checkpoint_id: candidate.base_checkpoint_id ?? resolvedBaseCommit,
       },
     };
   }
@@ -1126,6 +1315,8 @@ function validateAutoresearchCandidate(
       ...candidate,
       base_commit: resolvedBaseCommit,
       candidate_commit: resolvedCandidateCommit,
+      base_checkpoint_id: candidate.base_checkpoint_id ?? resolvedBaseCommit,
+      candidate_checkpoint_id: candidate.candidate_checkpoint_id ?? resolvedCandidateCommit,
     },
   };
 }
@@ -1138,7 +1329,7 @@ async function failAutoresearchIteration(
 ): Promise<'error'> {
   const headCommit = (() => {
     try {
-      return readGitShortHead(manifest.worktree_path);
+      return readCurrentWorkspaceMarker(manifest.worktree_path);
     } catch {
       return manifest.baseline_commit;
     }
@@ -1159,6 +1350,9 @@ async function failAutoresearchIteration(
     base_commit: candidate?.base_commit ?? manifest.last_kept_commit,
     candidate_commit: candidate?.candidate_commit ?? null,
     kept_commit: manifest.last_kept_commit,
+    base_checkpoint_id: candidate?.base_checkpoint_id ?? manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
+    candidate_checkpoint_id: candidate?.candidate_checkpoint_id ?? null,
+    kept_checkpoint_id: manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
     keep_policy: manifest.keep_policy,
     evaluator: null,
     created_at: nowIso(),
@@ -1180,6 +1374,9 @@ async function recordNonEvaluatedCandidateStatus(
     candidateStatus: candidate.status,
     baseCommit: candidate.base_commit,
     candidateCommit: candidate.candidate_commit,
+    baseCheckpointId: candidate.base_checkpoint_id,
+    candidateCheckpointId: candidate.candidate_checkpoint_id,
+    keptCheckpointId: manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
     notes: candidate.notes,
   };
 
@@ -1243,19 +1440,35 @@ export async function processAutoresearchCandidate(
   }
   candidate = validation.candidate;
   manifest.latest_candidate_commit = candidate.candidate_commit;
+  manifest.latest_candidate_checkpoint_id = candidate.candidate_checkpoint_id ?? null;
 
   if (candidate.status !== 'candidate') {
     return recordNonEvaluatedCandidateStatus(contract, manifest, projectRoot, candidate);
+  }
+
+  if (manifest.workspace_kind === 'svn' && manifest.snapshots_dir) {
+    const candidateCheckpointId = candidate.candidate_checkpoint_id || buildCheckpointId('candidate');
+    await captureWorkspaceSnapshot(manifest.worktree_path, manifest.snapshots_dir, candidateCheckpointId);
+    candidate = {
+      ...candidate,
+      candidate_checkpoint_id: candidateCheckpointId,
+    };
+    manifest.latest_candidate_checkpoint_id = candidateCheckpointId;
   }
 
   const evaluation = await runAutoresearchEvaluator(contract, manifest.worktree_path);
   await writeJsonFile(manifest.latest_evaluator_file, evaluation);
   const decision = decideAutoresearchOutcome(manifest, candidate, evaluation);
   if (decision.keep) {
-    manifest.last_kept_commit = readGitFullHead(manifest.worktree_path);
+    manifest.last_kept_commit = readCurrentWorkspaceIdentity(manifest.worktree_path);
+    if (manifest.workspace_kind === 'svn') {
+      manifest.last_kept_checkpoint_id = candidate.candidate_checkpoint_id ?? manifest.last_kept_checkpoint_id;
+    } else {
+      manifest.last_kept_checkpoint_id = manifest.last_kept_commit;
+    }
     manifest.last_kept_score = typeof evaluation.score === 'number' ? evaluation.score : manifest.last_kept_score;
   } else {
-    resetToLastKeptCommit(manifest);
+    await resetToLastKeptState(manifest);
   }
 
   await recordAutoresearchIteration(manifest, {
@@ -1267,6 +1480,9 @@ export async function processAutoresearchCandidate(
     candidateCommit: candidate.candidate_commit,
     evaluator: evaluation,
     notes: [...candidate.notes, ...decision.notes],
+    baseCheckpointId: candidate.base_checkpoint_id,
+    candidateCheckpointId: candidate.candidate_checkpoint_id,
+    keptCheckpointId: manifest.last_kept_checkpoint_id ?? manifest.last_kept_commit,
   });
   await writeRunManifest(manifest);
   await writeInstructionsFile(contract, manifest);
@@ -1274,6 +1490,7 @@ export async function processAutoresearchCandidate(
     current_phase: 'running',
     iteration: manifest.iteration,
     last_kept_commit: manifest.last_kept_commit,
+    last_kept_checkpoint_id: manifest.last_kept_checkpoint_id,
     last_kept_score: manifest.last_kept_score,
     latest_evaluator_status: evaluation.status,
     latest_evaluator_pass: evaluation.pass,
